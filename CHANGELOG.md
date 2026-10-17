@@ -3,6 +3,12 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.2.1] — 2026-10-18
+
+### Fixed
+
+- **包元数据缺少 `repository`**：`package.json` 里没有 `repository` / `homepage` / `bugs` / `author`，npm 页面因此没有源码链接；更关键的是 awesome-dsh-plugin 的 `scripts/probe-npm.mjs` 只在 npm 包的 `repository` 字段回指同一个 GitHub 仓库时才把包写进 `data/npm-map.json`，缺了它市场拿不到 npm 安装源。四个字段已补齐，代码与运行时行为无变化。
+
 ## [0.2.0] — 2026-10-17
 
 ### Changed
