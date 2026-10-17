@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/HERO476/dsh-delete-conversation/config.schema.json",
-  "title": "dsh-delete-conversation configuration",
+  "$id": "https://github.com/HERO476/dsh-conversation-recycle-bin/config.schema.json",
+  "title": "dsh-conversation-recycle-bin configuration",
   "description": "Host-side configuration for the conversation deletion plugin. The cordis.patch.yml config layer supplies defaults; higher-priority patch layers may override any field. The Host validates this object at activation (normalizeConfig) because this package intentionally does not depend on a schema runtime.",
   "type": "object",
   "additionalProperties": false,

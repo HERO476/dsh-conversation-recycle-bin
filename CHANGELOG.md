@@ -1,7 +1,29 @@
 # Changelog
 
-All notable changes to `dsh-delete-conversation` are documented here.
+All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
+
+## [0.2.0] — 2026-10-17
+
+### Changed
+
+- **Renamed** the package from `dsh-delete-conversation` to `dsh-conversation-recycle-bin`: the old npm name is owned by another author (`jiuling`, 1.0.1, a different implementation). The Client module id, the Cordis row id (`conversation-recycle-bin`), the HTTP prefix (`/conversation-recycle-bin/api`), the private header and all docs now use the new name.
+- **Compatibility:** durable data stays under `<DSH_HOME>/delete-conversation/`, so existing recycle-bin entries and the audit trail remain visible after the rename; the storage namespace is intentionally not migrated. A profile must replace the old bundle entry with the new package name and restart DSH.
+
+### Fixed
+
+- **记忆计数自相矛盾**：`preview.memory.adapters[].count` 用 `Object.values(Map)` 求和（对 `Map` 恒为 `[]`），所以每个可用适配器都显示 0 条、而 `memory.total` 却非 0。现在按填充 `bySession` 的同一批查找累加，`Σ adapters[].count === total`。
+- **失败的删除永久卡在回收站**：删除含记忆的会话时，记忆阶段回滚成功后 bundle 目录仍留在条目里，`POST /trash/discard` 因此判定「仍持有记忆文件」而拒绝，而 `restore`（status ≠ `trashed`）与 `purge`（status ∉ `trashed/restored`）也拒绝 —— 条目再也无法清理。现在 `restoreEntry` 在数据放回后删除已消费的 bundle 目录，未完成条目恢复可清理。
+- **`quiesce` 失败会把会话静默归档**：live 会话在 `liveDrainMs` 内停不下来时，`quiesce` 在抛错前尚未登记逆操作，整笔回滚后会话仍处于「已归档」（活动已停、会话列表隐藏）状态。现在归档的逆操作在等待之前登记，超时先撤销归档再抛 `E_POLICY_LIVE`。
+- **catalog 半途失败留下旁路修改**：hard 模式 `remove()` 依次执行 unarchive → unpin → detach，某个后续步骤失败时没有任何逆操作，回滚后会话仍处于「已取消归档/已取消固定」，等于一次失败的删除悄悄把会话放回了列表。现在每完成一步即登记该步的逆操作，失败时按逆序先还原。
+- **未完成条目本来无法恢复**：`performRestore` 只接受 `trashed`，但 `discard` 的提示语却说「请改用恢复或彻底删除」，构成死路。现在 `pending / failed / restoring / purging` 也可恢复：只执行 manifest 仍记录着 payload 的步骤（例如日志或 catalog 缺失时只把记忆放回），失败时沿用原状态而不再升格为 `trashed`；确实已无 payload 的条目则明确拒绝并提示改用 `discard`。
+- **客户端本地化判断不一致**：`t()` 对 locale id 做小写归一而 `errorText()` 没有，遇到 `ZH-CN` 这类混合大小写 id 时错误文案回退英文、同屏其他标签仍是中文。两者现在共用 `isZhLocale()`。
+- **`GET /state` 泄露宿主绝对路径**：响应中的 `storage.{trashDir,auditFile,dataDir}` 未被任何客户端使用，且与本模块「客户端只拿计数与状态、不拿文件句柄」的契约相冲突，已移除。
+- **locale 资源文案与实际行为不符**：`locale/{en,zh}.json` 的 `dialog.memoryCount` 写成「删除记忆」（实际是移入回收站）、`dialog.modeHardHint` 写成「从磁盘移除、回收站清理后不可恢复」（实际在回收站条目被清理前仍可恢复），已按实际语义更正。
+
+### Tests
+
+- 84 checks (was 77); added per-adapter count/total consistency, failed-delete → discard cleanup, quiesce rollback + un-archive, catalog half-failure rollback, restore-from-incomplete-entry (3 cases), mixed-case locale text.
 
 ## [0.1.5] — 2026-10-17
 
@@ -86,7 +108,7 @@ Initial implementation for DSH `0.2.1-rc.2` (Web profile).
   - `generic-json`: configurable JSON-index adapter for other local stores;
   - `none`: honest unavailable fallback (reports a reason instead of a misleading zero).
 - Safety and audit:
-  - same-origin check, private `x-delete-conversation: 1` header, loopback-only by default, body-size ceiling;
+  - same-origin check, private `x-conversation-recycle-bin: 1` header, loopback-only by default, body-size ceiling;
   - sliding-window rate limit (default 20 deletions/minute) and `maxBatchSessions` (default 50);
   - single-use confirmation tokens bound to `(sessionIds, includeMemory, mode)` with TTL;
   - JSONL audit trail with success / rolled-back / rollback-incomplete / denied / restore / purge records and size-based compaction;

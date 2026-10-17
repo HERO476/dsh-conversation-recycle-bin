@@ -11,7 +11,7 @@ const readJson = async (name) => JSON.parse(await read(name))
 
 test('manifest: package identity, exports and Bundle/Client declarations', async () => {
   const pkg = await readJson('package.json')
-  assert.equal(pkg.name, 'dsh-delete-conversation')
+  assert.equal(pkg.name, 'dsh-conversation-recycle-bin')
   assert.equal(pkg.type, 'module')
   assert.equal(pkg.main, 'lib/index.js')
   assert.equal(pkg.exports['.'], './lib/index.js')
@@ -47,7 +47,7 @@ test('manifest: the Host row patch keeps a stable id equal to the package name r
   const pkg = await readJson('package.json')
   const patch = await read('cordis.patch.yml')
   assert.match(patch, /-\s*insert:/)
-  assert.match(patch, /id:\s*delete-conversation/)
+  assert.match(patch, /id:\s*conversation-recycle-bin/)
   assert.match(patch, new RegExp(`name:\\s*${pkg.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })
 
@@ -71,7 +71,7 @@ test('manifest: the icon parses as an SVG document', async () => {
 test('manifest: the Client half exports the Cordis slots injection and the loader id', async () => {
   const client = await read('client.js')
   assert.match(client, /window\.__ModuleLoader__\.load\(\{/)
-  assert.match(client, /id:\s*'delete-conversation'/)
+  assert.match(client, /id:\s*'conversation-recycle-bin'/)
   assert.match(client, /exports\.inject = \['slots'\]/)
   assert.match(client, /exports\.apply = apply/)
   for (const slot of [
@@ -86,7 +86,7 @@ test('manifest: the Client half exports the Cordis slots injection and the loade
 
 test('manifest: the Host half exports name/inject/apply and deliberately no Config schema', async () => {
   const module = await import('../lib/index.js')
-  assert.equal(module.name, 'delete-conversation')
+  assert.equal(module.name, 'conversation-recycle-bin')
   assert.deepEqual(module.inject, ['webServer'])
   assert.equal(typeof module.apply, 'function')
   // No schema runtime is a dependency of this package, so the row config is

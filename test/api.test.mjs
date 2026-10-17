@@ -5,6 +5,7 @@ import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
 import { createDeleteApi, ROUTE_PREFIX } from '../lib/host/api.js'
 import { createSessionLogOps } from '../lib/host/catalog.js'
+import { createLifecycleOps } from '../lib/host/lifecycle.js'
 import { resolveDataPaths } from '../lib/host/paths.js'
 import { callRoute, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession } from './helpers.mjs'
 
@@ -12,7 +13,7 @@ const S1 = 'session-aaaaaaaa-1111'
 const S2 = 'session-bbbbbbbb-2222'
 const ORPHAN = 'session-cccccccc-3333'
 const HEADERS = {
-  'x-delete-conversation': '1',
+  'x-conversation-recycle-bin': '1',
   origin: 'http://127.0.0.1:14968',
   'content-type': 'application/json',
   'sec-fetch-site': 'same-origin',
@@ -359,7 +360,7 @@ test('rate limit: the per-minute budget is enforced across requests', async () =
 test('security: the private header and same-origin check are enforced', async () => {
   const fixture = await makeFixture()
   try {
-    const noHeader = await call(fixture.api, '/preview', { body: { sessionIds: [S1] }, headers: { 'x-delete-conversation': '' } })
+    const noHeader = await call(fixture.api, '/preview', { body: { sessionIds: [S1] }, headers: { 'x-conversation-recycle-bin': '' } })
     assert.equal(noHeader.status, 403)
     assert.equal(noHeader.body.error.code, 'E_FORBIDDEN_ORIGIN')
 
@@ -414,6 +415,8 @@ test('state: reports memory adapter availability and the current rate budget', a
     assert.equal(state.body.state.limits.rate.limit, fixture.config.maxDeletesPerMinute)
     assert.equal(typeof state.body.state.version, 'string')
     assert.equal(state.body.state.limits.effectiveBatch, Math.min(fixture.config.maxBatchSessions, fixture.config.maxDeletesPerMinute))
+    // The response must not hand the browser absolute filesystem paths.
+    assert.equal('storage' in state.body.state, false)
   } finally {
     await fixture.home.cleanup()
   }
@@ -506,6 +509,87 @@ test('trash: an entry that never committed is listed and can be discarded', asyn
   } finally {
     await fixture.home.cleanup()
   }
+})
+
+test('trash: a failed delete that had moved memory is cleanable once the put-back succeeded', async () => {
+  const fixture = await makeFixture()
+  try {
+    // Only the catalog step fails; the memory stage already moved its nodes and
+    // the rollback puts them back, so the entry holds nothing anymore.
+    fixture.workspaceRegistry.archiveSession = async () => { throw new Error('catalog exploded') }
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: true, mode: 'soft' } })
+    const failed = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: true, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(failed.status, 500)
+    assert.equal(failed.body.error.details.rolledBack, true)
+
+    const index = JSON.parse(await readFile(join(fixture.memoryRoot, '_index.json'), 'utf8'))
+    assert.equal(Object.values(index.nodes).filter((node) => node.session === S1).length, 2)
+
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 0)
+    assert.equal(trash.body.incomplete.length, 1)
+    const trashId = trash.body.incomplete[0].trashId
+    // The consumed bundle must not be left behind: a leftover `bundle.json`
+    // used to make the entry look like it still held memory payload, so
+    // discard refused it forever while restore/purge refused its status.
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId, 'memory', 'lingshu', 'bundle.json')), false)
+
+    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'DELETE' } })
+    assert.equal(discarded.status, 200)
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('hard delete: a catalog step refused halfway puts the archive flag back', async () => {
+  const fixture = await makeFixture()
+  try {
+    // The conversation was archived before the delete; `unarchiveSession` runs
+    // first and the detach is then refused, so the rollback must re-archive it
+    // instead of leaving a "failed" deletion with a visibly unarchived row.
+    await writeFile(
+      join(fixture.home.root, 'storages', 'workspace.json'),
+      JSON.stringify({ global: { archivedSessionIds: [S1], pinnedSessionIds: [] } }),
+      'utf8',
+    )
+    await fixture.workspaceRegistry.archiveSession(S1)
+    fixture.workspaceRegistry.get('ws-1').detachSession = async () => { throw new Error('writer busy') }
+
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'hard' } })
+    assert.equal(preview.body.preview.sessions[0].archived, true)
+    const failed = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(failed.status, 500)
+    assert.equal(failed.body.error.details.failedStep, 'session')
+    assert.equal(fixture.workspaceRegistry.globalState.archived.has(S1), true)
+    assert.equal(fixture.workspaceRegistry.get('ws-1').sessionIds.includes(S1), true)
+    assert.equal(await pathExists(join(fixture.seeded.get(S1).dir, 'session.jsonl.zstd')), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('lifecycle: a session that will not stop is un-archived when the delete rolls back', async () => {
+  const registry = makeWorkspaceRegistry([{ id: 'ws-1', path: 'D:\\Work', sessionIds: [] }])
+  const controller = { async cancel() {} }
+  const lifecycle = createLifecycleOps({
+    ctx: { get: (name) => (name === 'workspaceRegistry' ? registry : controller) },
+    // The turn never settles, so the bounded drain expires.
+    gateway: { invalidate() {}, async inspect() { return { id: S1, running: true, archived: false } } },
+    config: normalizeConfig({ liveDrainMs: 0 }).value,
+  })
+  await assert.rejects(
+    () => lifecycle.quiesce({ id: S1, live: true, running: true, archived: false }),
+    (error) => error.code === 'E_POLICY_LIVE',
+  )
+  // The archive this stage performed must not survive the rolled back delete.
+  assert.equal(registry.globalState.archived.has(S1), false)
+  assert.ok(registry.events.some((event) => event[0] === 'archive' && event[1] === S1))
+  assert.ok(registry.events.some((event) => event[0] === 'unarchive' && event[1] === S1))
 })
 
 test('hard delete: a log being written by another instance is not moved', async () => {

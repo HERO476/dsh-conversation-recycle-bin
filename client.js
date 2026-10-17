@@ -1,5 +1,5 @@
 /**
- * dsh-delete-conversation — Client half.
+ * dsh-conversation-recycle-bin — Client half.
  *
  * Hand-authored in the Web shell's module-loader format (`window.__ModuleLoader__.load`
  * + `require`), so the package needs no build step. The Client owns every pixel; all
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
   // reported as "loaded without registering" and then executed a second time
   // from its one-resource URL, which throws
   // `duplicate factory registration for "..."` and aborts web boot.
-  id: 'dsh-delete-conversation',
+  id: 'dsh-conversation-recycle-bin',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
@@ -36,7 +36,7 @@ window.__ModuleLoader__.load({
      * Locale
      * ------------------------------------------------------------------ */
 
-    const NS = 'delete-conversation'
+    const NS = 'conversation-recycle-bin'
     const STRINGS = {
       en: {
         'action.menuDelete': 'Delete conversation…',
@@ -285,9 +285,12 @@ window.__ModuleLoader__.load({
       return language.toLowerCase().startsWith('zh') ? 'zh' : 'en'
     }
 
+    function isZhLocale(localeId) {
+      return String(localeId ?? '').toLowerCase().startsWith('zh')
+    }
+
     function t(key, vars) {
-      const locale = currentLocaleId()
-      const table = locale.toLowerCase().startsWith('zh') ? STRINGS.zh : STRINGS.en
+      const table = isZhLocale(currentLocaleId()) ? STRINGS.zh : STRINGS.en
       const template = table[key] ?? STRINGS.en[key] ?? key
       if (vars === undefined) return template
       return template.replace(/\{(\w+)\}/g, (match, name) => {
@@ -298,7 +301,9 @@ window.__ModuleLoader__.load({
 
     function errorText(error) {
       const code = error?.code
-      const table = STRINGS[currentLocaleId().startsWith('zh') ? 'zh' : 'en']
+      // Same locale test as `t`: a mixed-case id (e.g. "ZH-CN") used to fall
+      // through to the English table while every other string stayed Chinese.
+      const table = isZhLocale(currentLocaleId()) ? STRINGS.zh : STRINGS.en
       const template = code === undefined ? undefined : table[`error.${code}`]
       if (template === undefined) return error?.message ?? String(error)
       return template.replace(/\{(\w+)\}/g, (match, name) => {
@@ -324,7 +329,7 @@ window.__ModuleLoader__.load({
      * Host HTTP client
      * ------------------------------------------------------------------ */
 
-    const API_PREFIX = '/delete-conversation/api'
+    const API_PREFIX = '/conversation-recycle-bin/api'
     const REQUEST_TIMEOUT_MS = 15_000
     const MUTATION_TIMEOUT_MS = 180_000
 
@@ -356,7 +361,7 @@ window.__ModuleLoader__.load({
       try {
         const base = typeof document !== 'undefined' && typeof document.baseURI === 'string' ? document.baseURI : 'http://127.0.0.1/'
         const url = new URL(`${API_PREFIX}${path}`, base)
-        const headers = { 'x-delete-conversation': '1' }
+        const headers = { 'x-conversation-recycle-bin': '1' }
         if (options.body !== undefined) headers['content-type'] = 'application/json'
         const response = await fetch(url, {
           method,
@@ -563,7 +568,7 @@ window.__ModuleLoader__.load({
           await sessions.refresh()
           refreshed = true
         } catch (error) {
-          console.warn('[delete-conversation] session list refresh failed', error)
+          console.warn('[conversation-recycle-bin] session list refresh failed', error)
         }
       }
       if (closeCurrent && current !== undefined && sessionIds.includes(current)) {
@@ -584,7 +589,7 @@ window.__ModuleLoader__.load({
               // private by dsh-client-ui-workspace). `sessions.refresh()`
               // succeeded, so without this the shell would keep rendering a
               // conversation whose log was just moved away.
-              console.warn('[delete-conversation] the host cannot close the current conversation in place; reloading')
+              console.warn('[conversation-recycle-bin] the host cannot close the current conversation in place; reloading')
               refreshed = false
             }
           } catch {
@@ -1320,7 +1325,7 @@ window.__ModuleLoader__.load({
       runtimeCtx = ctx
       const slots = ctx.slots ?? (typeof ctx.get === 'function' ? ctx.get('slots') : undefined)
       if (slots === undefined || slots === null || typeof slots.inject !== 'function') {
-        console.error('[delete-conversation] slots service unavailable; UI not registered')
+        console.error('[conversation-recycle-bin] slots service unavailable; UI not registered')
         return
       }
 
@@ -1353,26 +1358,26 @@ window.__ModuleLoader__.load({
       // item unmounts with its dropdown, which would take the dialog with it.
       ctx.effect(() => slots.inject('shell.overlay', () => slots.register({
         name: 'shell.overlay',
-        id: 'delete-conversation-dialog',
+        id: 'conversation-recycle-bin-dialog',
         order: 50,
       }, () => h(DialogHost))))
 
       ctx.effect(() => slots.inject('sidebar.workspaces.session.menu.item', () => slots.register({
         name: 'sidebar.workspaces.session.menu.item',
-        id: 'delete-conversation',
+        id: 'conversation-recycle-bin',
         order: 500,
       }, (props) => h(DeleteMenuRow, props))))
 
       ctx.effect(() => slots.inject('conversation.session.header.actions', () => slots.register({
         name: 'conversation.session.header.actions',
-        id: 'delete-conversation',
+        id: 'conversation-recycle-bin',
         order: 100,
       }, (props) => h(HeaderDeleteAction, props))))
 
       const hasLocaleService = peekLocaleService() !== null
       ctx.effect(() => slots.inject('settings.section', () => slots.register({
         name: 'settings.section',
-        id: 'delete-conversation',
+        id: 'conversation-recycle-bin',
         order: 1300,
         // A thunk label is re-read on locale switches, but pre-locale shells
         // render the label string directly and would crash on a function.
@@ -1380,12 +1385,13 @@ window.__ModuleLoader__.load({
       }, () => h(SettingsSection))))
     }
 
-    exports.name = 'delete-conversation'
+    exports.name = 'conversation-recycle-bin'
     // Without this Cordis may run apply() before the slot service exists, and
     // the registration would silently never happen (no retry).
     exports.inject = ['slots']
     exports.apply = apply
     exports.__t = t
+    exports.__errorText = errorText
     exports.__store = { dialogStore, flashStore, mutationStore, uiFlagsStore }
     exports.__refreshAfterMutation = refreshAfterMutation
     exports.__mutationTimeoutMs = mutationTimeoutMs

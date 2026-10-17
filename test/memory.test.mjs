@@ -223,6 +223,11 @@ test('memory service: overlapping stores are counted once and protected totals a
     const result = await service.countForSessions([SESSION_1])
     assert.equal(result.total, 3)
     assert.equal(result.protected, 1)
+    // The per-adapter count must agree with the total: it used to be summed
+    // with Object.values(Map) and therefore always reported 0.
+    const lingshu = result.adapters.find((adapter) => adapter.id === 'lingshu')
+    assert.equal(lingshu.count, 3)
+    assert.equal(result.adapters.reduce((sum, adapter) => sum + adapter.count, 0), result.total)
     const stores = await service.status()
     assert.equal(stores.filter((state) => state.available).length, 1)
   } finally {

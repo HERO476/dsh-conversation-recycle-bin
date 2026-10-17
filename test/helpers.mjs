@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-export async function makeTempHome(prefix = 'dsh-delete-conversation-test-') {
+export async function makeTempHome(prefix = 'dsh-conversation-recycle-bin-test-') {
   const root = await mkdtemp(join(process.cwd(), 'test', '.tmp', prefix))
   await mkdir(join(root, 'sessions'), { recursive: true })
   await mkdir(join(root, 'storages'), { recursive: true })

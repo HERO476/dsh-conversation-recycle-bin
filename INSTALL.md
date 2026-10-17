@@ -1,17 +1,17 @@
-# 安装与回滚（dsh-delete-conversation）
+# 安装与回滚（dsh-conversation-recycle-bin）
 
 本插件只使用 DSH 的公开扩展点：一个 bundle patch 行（Host）+ 一个 `dsh.client` Web 半（Client）。不需要 pnpm 安装依赖、不需要构建步骤。
 
-- 包目录：`D:\Users\34332\AI\dsh-delete-conversation`
+- 包目录：`D:\Users\34332\AI\dsh-conversation-recycle-bin`
 - 宿主 profile：当前 GUI 实际使用的 profile。本机实测为 `C:\Users\34332\.dsh\profiles\desktop`；若你在其他 profile（例如 `profiles\web`）里使用，`install_bundle` 也必须在该 profile 对应的会话中执行。
-- 数据目录：`<DSH_HOME>/delete-conversation/`（默认 `C:\Users\34332\.dsh\delete-conversation`）
+- 数据目录：`<DSH_HOME>/delete-conversation/`（默认 `C:\Users\34332\.dsh\delete-conversation`）。目录名沿用旧插件名，改名不会迁移已有回收站/审计数据，这是有意为之；不要因为插件改名去重命名该目录。
 
 ## 1. 安装（推荐：Plugin Manager）
 
 在 DSH 会话中执行（需要 danger-full-access 或批准）：
 
 ```text
-plugin_manager action=install_bundle target="D:\\Users\\34332\\AI\\dsh-delete-conversation"
+plugin_manager action=install_bundle target="D:\\Users\\34332\\AI\\dsh-conversation-recycle-bin"
 ```
 
 `install_bundle` 会完成：登记 profile 的 `dsh.profile.bundles`、解析本地包、按 `dsh.bundle.patch` 插入 Host 行、由 `dsh.client` 提供 Web 半。不要手写 profile 的 `package.json` 或 `cordis.patch.yml` 来代替它。
@@ -27,18 +27,20 @@ plugin_manager action=install_bundle target="D:\\Users\\34332\\AI\\dsh-delete-co
 ### 2.1 Host 行与服务
 
 ```text
-cordis_inspect_query platform=host provider=Config method=listConfigs name=dsh-delete-conversation
+cordis_inspect_query platform=host provider=Config method=listConfigs name=dsh-conversation-recycle-bin
 ```
 
-应能看到 `delete-conversation` 行。该行的 `status` 为 `absent` 属于预期：本插件不导出 `Config` schema（不想依赖 schema 运行时），配置在 `apply()` 内由 `normalizeConfig` 校验，`cordis.patch.yml` 给出默认层。
+应能看到 `conversation-recycle-bin` 行。该行的 `status` 为 `absent` 属于预期：本插件不导出 `Config` schema（不想依赖 schema 运行时），配置在 `apply()` 内由 `normalizeConfig` 校验，`cordis.patch.yml` 给出默认层。
 
 ### 2.2 HTTP API
 
 浏览器或同源请求访问：
 
 ```text
-GET http://127.0.0.1:14968/delete-conversation/api/state
+GET http://127.0.0.1:<Web 端口>/conversation-recycle-bin/api/state
 ```
+
+端口以当前 GUI 地址栏为准（本机最近为 `8080`）。
 
 预期 `{"ok":true,"state":{...}}`，其中 `state.memory.adapters` 应显示 `lingshu available: true`（若本机存在 `.dsh-memory/data/mdcg`）。命令行走 `Invoke-WebRequest` 时若被同源策略拒绝属于预期；用浏览器 DevTools 或页面内请求验证。
 
@@ -50,7 +52,7 @@ cordis_inspect_query platform=client provider=Slots method=listSubTree input={"r
 cordis_inspect_query platform=client provider=Slots method=listSubTree input={"root":"settings.section"}
 ```
 
-应出现 `registrant` 为 `delete-conversation`、id 为 `delete-conversation`、order 分别为 500 / 100 / 1300 的占用。
+应出现 `registrant` 为 `conversation-recycle-bin`、id 为 `conversation-recycle-bin`、order 分别为 500 / 100 / 1300 的占用。
 
 ### 2.4 手工验收清单（需要浏览器）
 
@@ -71,27 +73,27 @@ cordis_inspect_query platform=client provider=Slots method=listSubTree input={"r
 ### 3.1 移除插件（推荐）
 
 ```text
-plugin_manager action=remove_bundle target=dsh-delete-conversation
+plugin_manager action=remove_bundle target=dsh-conversation-recycle-bin
 ```
 
 返回 `restart-required` 时重启 DSH。移除后：
 
 - 会话数据不受影响（插件从不删除未被用户确认的会话）；
 - 插件自己的数据目录**保留**：`<DSH_HOME>/delete-conversation/`。确认不再需要回收站后，可手动删除该目录释放空间；
-- 如果移除前有未恢复的 hard 删除条目，先执行恢复：`POST /delete-conversation/api/trash/restore`（或先在 UI 恢复），否则该目录删除后无法再通过插件恢复。
+- 如果移除前有未恢复的 hard 删除条目，先执行恢复：`POST /conversation-recycle-bin/api/trash/restore`（或先在 UI 恢复），否则该目录删除后无法再通过插件恢复。
 
 ### 3.2 手工回退（仅在 Plugin Manager 不可用时）
 
-1. 从 `<DSH_HOME>/profiles/web/package.json` 的 `dsh.profile.bundles` 中移除 `dsh-delete-conversation`；
+1. 从 `<DSH_HOME>/profiles/<profile>/package.json` 的 `dsh.profile.bundles` 中移除 `dsh-conversation-recycle-bin`；
 2. 删除/移除 profile `node_modules` 下对应的链接（若存在）；
-3. 若曾手工编辑 `cordis.patch.yml`，删除 `delete-conversation` 行；
+3. 若曾手工编辑 `cordis.patch.yml`，删除 `conversation-recycle-bin` 行；
 4. 重启 DSH。
 
 不要在 Host 仍持有文件句柄时手工移动 `<DSH_HOME>/delete-conversation/trash/<id>/session/`；用恢复 API 或先停 DSH。
 
 ## 4. 升级
 
-1. 修改 `D:\Users\34332\AI\dsh-delete-conversation`（覆盖安装目录后需重启以加载新的 Host 模块代际）；
+1. 修改 `D:\Users\34332\AI\dsh-conversation-recycle-bin`（覆盖安装目录后需重启以加载新的 Host 模块代际）；
 2. 运行 `npm test` 与 `npm run check`；
 3. 重新 `install_bundle`（或 `set_bundle`）并重启；
 4. 升级后用一个**测试会话**跑一次单条软删除 + 回收站恢复，再投入日常使用。
@@ -100,7 +102,7 @@ plugin_manager action=remove_bundle target=dsh-delete-conversation
 
 | 症状 | 原因 / 处理 |
 |---|---|
-| 菜单/头部/设置页没有入口 | Client 半未激活。检查 `dsh.client` 是否存在、`client.js` 是否可被宿主打包路由加载、`cordis_inspect_query Slots` 是否有 `delete-conversation` 占用；重启后重试 |
+| 菜单/头部/设置页没有入口 | Client 半未激活。检查 `dsh.client` 是否存在、`client.js` 是否可被宿主打包路由加载、`cordis_inspect_query Slots` 是否有 `conversation-recycle-bin` 占用；重启后重试 |
 | 入口在但弹出 403 | 请求被同源/loopback 校验拒绝。确认页面地址与 `Host` 头一致；反向代理/远程访问需在配置里显式 `allowNonLoopback: true`（会放宽本机限制，谨慎） |
 | `E_POLICY_ORPHAN` | 会话未登记到任何工作区。确属要删时在配置中 `allowOrphanSessions: true`，或先在工作区里登记 |
 | `E_POLICY_LIVE` | 配置了 `stopLiveSessions: false` 且会话仍活跃；或插件在 `liveDrainMs` 内无法停住该会话（仍在运行）。改为默认配置，或等该会话空闲后重试 |

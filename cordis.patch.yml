@@ -1,4 +1,4 @@
-# dsh-delete-conversation — bundle patch.
+# dsh-conversation-recycle-bin — bundle patch.
 #
 # Inserts the plugin's single Host row. The row `id` is stable because the
 # Plugins settings page and `plugins.row.config` key on it.
@@ -12,10 +12,10 @@
 #   - No agent tool is registered. Deleting conversations is a user-only action;
 #     the model cannot execute or authorize it.
 #   - The HTTP route is same-origin only and requires the plugin's private
-#     `x-delete-conversation` header, so a cross-site form cannot reach it.
+#     `x-conversation-recycle-bin` header, so a cross-site form cannot reach it.
 - insert:
-    - id: delete-conversation
-      name: dsh-delete-conversation
+    - id: conversation-recycle-bin
+      name: dsh-conversation-recycle-bin
       config:
         enabled: true
         # Refuse every request when the Web server is bound beyond loopback,

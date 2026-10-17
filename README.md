@@ -1,26 +1,27 @@
-# dsh-delete-conversation
+# dsh-conversation-recycle-bin
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.1.5`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.2.0`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
 ## 1. 宿主平台规范确认（第一步）
 
-以下结论来自对当前安装的 DSH `0.2.1-rc.2`（Web profile）的 `cordis_inspect_query` 与实现源码核对，不是假设：
+以下结论来自对当前安装的 DSH `0.2.1-rc.2`（桌面端 desktop profile）的 `cordis_inspect_query` 与实现源码核对，不是假设：
 
 | 项目 | DSH 事实 | 本插件的落点 |
 |---|---|---|
-| 插件单元 | 一个 bundle = `package.json` 的 `dsh.bundle.patch` + `cordis.patch.yml` 的 `- insert:` 行；行 `id` 是 Plugins 页与配置的稳定键 | `cordis.patch.yml` 插入一行 `id: delete-conversation` |
+| 插件单元 | 一个 bundle = `package.json` 的 `dsh.bundle.patch` + `cordis.patch.yml` 的 `- insert:` 行；行 `id` 是 Plugins 页与配置的稳定键 | `cordis.patch.yml` 插入一行 `id: conversation-recycle-bin` |
 | 权限/配置声明 | 宿主校验服务访问靠 Cordis `inject`；行配置靠 `export const Config`（需要 schema 运行时依赖）。社区插件的无 schema 路径：在 `apply()` 里自校验并在 `/state` 暴露问题 | 无 `Config` 导出；`lib/core/config.js#normalizeConfig` 严格校验 + `config.schema.json` 文档 + `/state` 报告 |
 | 服务注入 | Host：`export const inject = [...]`；可选服务用 `ctx.get(name)` 逐次探测。`webServer` 在插件行挂载时可能尚未发布，一次性 `ctx.get('webServer')` 会永久拿到 `undefined` | `inject = ['webServer']`（路由是产品本体）；其余服务请求时探测，缺失返回可读错误 |
 | UI 扩展 | 只通过 Slot：`ctx.slots.inject(key, () => ctx.slots.register(options, Component))`；Client 半必须 `exports.inject = ['slots']`，否则 `apply` 可能先于 slot 服务运行而静默不注册 | `client.js` 注册 4 个槽位（见 §3） |
 | 会话列表入口 | `sidebar.workspaces.session.menu.item`（list / root）：owner props `{sessionId, displayTitle}`，额外注入 `useMenuOpenState()`，用 `setOpen(false)` 关闭菜单 | 「…」菜单新增一行「删除对话…」 |
 | 会话详情页入口 | `conversation.session.header.actions`（list / session）：标准 props 直接含 `sessionId` | 头部新增一个删除图标按钮 |
 | 对话框落点 | 菜单项随下拉菜单卸载；对话框必须挂在根级 overlay | `shell.overlay` 里的 `DialogHost`，菜单项只写模块级 dialog store |
-| Client→Host | 生成式 `ctx.remote.*` 在构建期固定，纯 JS 插件无法新增命名空间；Client `ctx.connection` 没有 `fetch`；推荐 Host `ctx.webServer.register({kind:'prefix', path, handler})` + 同源 `fetch(document.baseURI)` | 自定义路由 `/delete-conversation/api/*` |
+| Client→Host | 生成式 `ctx.remote.*` 在构建期固定，纯 JS 插件无法新增命名空间；Client `ctx.connection` 没有 `fetch`；推荐 Host `ctx.webServer.register({kind:'prefix', path, handler})` + 同源 `fetch(document.baseURI)` | 自定义路由 `/conversation-recycle-bin/api/*` |
 | 路由鉴权 | Web server 本身不鉴权；官方插件用 `ctx.connection.requestRejection(req)` 兜底。本插件另加：同源校验、loopback 默认、私有无头 header、JSON content-type、体积上限 | 见 `lib/host/api.js#requestOriginVerdict` |
 | Agent 工具 | 用户授权类操作应保持 user-only（skill `user-actions`） | **不注册任何 agent tool**，模型无法执行或授权删除 |
 
@@ -108,7 +109,7 @@ memory  →  messages  →  session/catalog
 |---|---|
 | 误删 | 默认软删除；记忆复选框默认关；回收站；彻底删除一键但仍写回收站可恢复；批量软删除需输入数量 |
 | 批量误操作 | `maxBatchSessions`（实际上限还会被本分钟剩余额度收紧，避免"合法批量必然 429"）；批量需输入数量；每个会话独立事务 |
-| 暴力/脚本调用 | 同源校验 + `x-delete-conversation: 1` 私有 header + 限流；默认仅接受 loopback 绑定，`allowNonLoopback=false` |
+| 暴力/脚本调用 | 同源校验 + `x-conversation-recycle-bin: 1` 私有 header + 限流；默认仅接受 loopback 绑定，`allowNonLoopback=false` |
 | 越权/越界 | 不在工作区登记的会话默认拒绝；可配置允许根目录白名单；受保护 id 列表；子代理会话默认拒绝 |
 | 活跃会话被写坏 | hard 模式对 live 会话先走 `quiesce`：取消当前轮次 → `archiveSession({stopActivity:true})` → 在 `liveDrainMs` 内等待 `running=false`，之后才移动日志；仍停不下来则整笔回滚并报 `E_POLICY_LIVE`。`stopLiveSessions:false` 可恢复为直接拒绝 |
 | 另一个 Host 正在写 | 移动前按 `foreignWriterGraceMs` 复检日志 mtime；仍在增长则报 `E_POLICY_FOREIGN_WRITER`。best-effort：两端同时运行时仍应先关闭另一端的会话 |
@@ -117,6 +118,8 @@ memory  →  messages  →  session/catalog
 | 外部记忆存储损坏 | 灵枢适配器持有其 `_index.json.lock`，先写 restore bundle 再原子改写索引；任何一步失败先还原正文与索引；详情见 §5.3 |
 
 ### 4.3 回收站布局
+
+存储目录沿用旧插件的 `delete-conversation`（不是新包名），这样 0.2.0 改名后已有的回收站条目和审计日志仍然可见。
 
 ```
 <DSH_HOME>/delete-conversation/
@@ -157,7 +160,7 @@ memory  →  messages  →  session/catalog
 ## 6. 目录结构与代码地图
 
 ```
-dsh-delete-conversation/
+dsh-conversation-recycle-bin/
 ├─ package.json                 # bundle + dsh.client 声明
 ├─ cordis.patch.yml             # Host 行与默认配置
 ├─ config.schema.json           # 配置/权限的机器可读声明
@@ -182,7 +185,7 @@ dsh-delete-conversation/
 │     ├─ lifecycle.js           # live 会话停机：cancel + archive + drain
 │     ├─ memory.js               # 适配器装配
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 77 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + Client 半渲染冒烟
+└─ test/                        # 84 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + Client 半渲染冒烟
 ```
 
 ---
@@ -190,8 +193,8 @@ dsh-delete-conversation/
 ## 7. 测试与验收
 
 ```powershell
-cd D:\Users\34332\AI\dsh-delete-conversation
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && api（77 个用例）
+cd D:\Users\34332\AI\dsh-conversation-recycle-bin
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && api（84 个用例）
 npm run check   # 语法 + manifest
 ```
 

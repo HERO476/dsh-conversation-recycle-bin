@@ -76,7 +76,7 @@ test('client: module id equals the package name the boot graph keys rows by', as
 
 test('client: registers every slot through the module-loader contract', async () => {
   const { exported, registrations, style } = await loadClient()
-  assert.equal(exported.name, 'delete-conversation')
+  assert.equal(exported.name, 'conversation-recycle-bin')
   assert.deepEqual(exported.inject, ['slots'])
   assert.equal(typeof exported.apply, 'function')
 
@@ -119,7 +119,7 @@ test('client: registers every slot through the module-loader contract', async ()
   }
   const settings = registrations.find((entry) => entry.options.name === 'settings.section')
   assert.equal(settings.options.order, 1300)
-  assert.equal(style.attrs['data-dsh-plugin'], 'delete-conversation')
+  assert.equal(style.attrs['data-dsh-plugin'], 'conversation-recycle-bin')
   // Disposal must not throw.
   for (const dispose of disposers.reverse()) dispose()
 })
@@ -327,6 +327,30 @@ test('client: mutation timeouts grow with the batch instead of a flat 15s', asyn
   assert.equal(exported.__mutationTimeoutMs(1), 35_000)
   assert.equal(exported.__mutationTimeoutMs(20), 130_000)
   assert.equal(exported.__mutationTimeoutMs(100), 180_000)
+})
+
+test('client: labels and error text agree on a mixed-case locale id', async () => {
+  const { exported } = await loadClient()
+  exported.apply({
+    slots: {
+      inject(key, callback) { return callback() ?? (() => {}) },
+      register() { return () => {} },
+    },
+    effect(fn) { fn() },
+    get(name) {
+      if (name === 'locale') return { getSnapshot: () => ({ locale: 'ZH-CN' }) }
+      return undefined
+    },
+  })
+  assert.equal(exported.__t('section.title'), '对话删除')
+  // `errorText` used to compare the raw id, so "ZH-CN" fell through to the
+  // English table while every label around it stayed Chinese.
+  assert.equal(
+    exported.__errorText({ code: 'E_POLICY_ORPHAN', message: 'fallback' }),
+    '该对话不属于任何已登记工作区。',
+  )
+  // Non-localized errors keep the Host message.
+  assert.equal(exported.__errorText({ code: 'E_UNKNOWN', message: 'raw host text' }), 'raw host text')
 })
 
 test('client: incomplete recycle-bin entries render with a discard action', async () => {

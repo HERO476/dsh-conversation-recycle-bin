@@ -285,6 +285,61 @@ test('delete: a failing live hard delete rolls the quiesce step back last', asyn
   ])
 })
 
+test('restore: an incomplete entry that still holds moved payload is restorable', async () => {
+  const { ops, calls } = makeOps()
+  const trash = makeTrash()
+  const entry = {
+    format: 1,
+    trashId: 't5-failed',
+    sessionId: session.id,
+    title: 'Test chat',
+    mode: 'hard',
+    includeMemory: true,
+    status: 'failed',
+    // The messages undo failed, so the manifest still points at the moved log;
+    // the catalog was never captured. Restoring is the only safe way out of
+    // that state (discard refuses it because it holds payload).
+    sessionLog: { sessionId: session.id, from: '/sessions/session', to: '/trash/session' },
+    catalog: null,
+    memory: { adapters: [{ id: 'lingshu', count: 2, bundlePath: '/brand/x' }], total: 2 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await performRestore({ entry, ops, trash, audit: makeAudit(), now: () => 3_000 })
+  assert.deepEqual(calls.map((call) => call[0]), ['messages-restore', 'memory-restore'])
+  assert.equal(trash.entries.has(entry.trashId), false)
+})
+
+test('restore: an incomplete entry with nothing left to restore is refused', async () => {
+  const { ops } = makeOps()
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't6-empty', sessionId: session.id, title: 'T', mode: 'soft', includeMemory: false,
+    status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await assert.rejects(performRestore({ entry, ops, trash, audit: makeAudit() }), (error) => {
+    assert.equal(error.code, 'E_TRASH_CONFLICT')
+    assert.match(error.message, /nothing left to restore/)
+    return true
+  })
+  // Nothing was mutated, so the entry keeps its status instead of being
+  // promoted to a restorable `trashed` row.
+  assert.equal(trash.entries.get(entry.trashId).status, 'failed')
+})
+
+test('restore: a failed restore of an incomplete entry keeps its original status', async () => {
+  const { ops } = makeOps()
+  ops.catalog.restore = async () => { throw new Error('catalog restore failed') }
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't7-half', sessionId: session.id, title: 'T', mode: 'soft', includeMemory: false,
+    status: 'failed', sessionLog: null, catalog: { sessionId: session.id, workspaceId: 'ws-1' }, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await assert.rejects(performRestore({ entry, ops, trash, audit: makeAudit() }), { code: 'E_TRANSACTION_FAILED' })
+  assert.equal(trash.entries.get(entry.trashId).status, 'failed')
+})
+
 test('purge: a live soft entry is quiesced before its log is removed', async () => {
   const liveSession = { ...session, archived: true, live: true, running: false }
   const { ops, calls } = makeOps({ inspect: async () => liveSession })
