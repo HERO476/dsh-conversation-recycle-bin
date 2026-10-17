@@ -1,0 +1,73 @@
+# dsh-delete-conversation — bundle patch.
+#
+# Inserts the plugin's single Host row. The row `id` is stable because the
+# Plugins settings page and `plugins.row.config` key on it.
+#
+# Everything under `config` is the DEFAULT layer. The Host rebinds these values
+# with `normalizeConfig()` at activation; user overrides go through the same
+# row in a higher-priority patch layer (profile patch or agent preset) and are
+# therefore validated identically. `config.schema.json` documents the contract.
+#
+# Security posture (see README "权限声明"):
+#   - No agent tool is registered. Deleting conversations is a user-only action;
+#     the model cannot execute or authorize it.
+#   - The HTTP route is same-origin only and requires the plugin's private
+#     `x-delete-conversation` header, so a cross-site form cannot reach it.
+- insert:
+    - id: delete-conversation
+      name: dsh-delete-conversation
+      config:
+        enabled: true
+        # Refuse every request when the Web server is bound beyond loopback,
+        # unless the operator opts in explicitly below.
+        requireSameOrigin: true
+        allowNonLoopback: false
+        # Session ownership policy.
+        allowOrphanSessions: false      # sessions with no registered workspace
+        allowSubagentSessions: false    # sessions created by subagents
+        # Hard deletion stops a live session first (cancel turn + archive
+        # stopActivity) and waits up to liveDrainMs for it to settle. Set
+        # stopLiveSessions:false to refuse live sessions outright instead.
+        stopLiveSessions: true
+        liveDrainMs: 2000
+        # A second DSH Host (desktop + `dsh web` share one DSH_HOME) can write a
+        # session this process believes is cold. Re-check the newest log mtime
+        # after this window before moving it; 0 disables the guard.
+        foreignWriterGraceMs: 1500
+        protectedSessionIds: []
+        allowedWorkspaceRoots: []       # [] = every registered workspace
+        # Reversible-by-default deletion.
+        defaultMode: soft               # soft | hard
+        trashRetentionDays: 30
+        # Batch safety.
+        maxBatchSessions: 50
+        maxDeletesPerMinute: 20
+        confirmTokenTtlMs: 120000
+        # Audit log.
+        auditRetentionLines: 5000
+        auditMaxBytes: 5242880
+        # Conversation-associated memory adapters, tried in order.
+        memory:
+          enabled: true
+          adapters:
+            - lingshu
+            - generic-json
+            - none
+          lingshu:
+            # nulls auto-detect `<DSH_HOME>/.dsh-memory/data/mdcg`.
+            rootDir: null
+          generic:
+            # Disabled unless both paths point at a JSON index whose `nodes`
+            # (or `nodesPointer`) records a `session` field per node.
+            indexFile: null
+            rootDir: null
+            sessionField: session
+            nodesPointer: /nodes
+          # Should a checked "delete associated memory" move entries to the
+          # plugin trash (recoverable) or leave them untouched?
+          deleteMode: trash
+        ui:
+          showRowAction: true
+          showHeaderAction: true
+          # Batch deletion requires typing the batch size in the dialog.
+          batchDoubleConfirm: true

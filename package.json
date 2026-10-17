@@ -1,0 +1,69 @@
+{
+  "name": "dsh-delete-conversation",
+  "version": "0.1.5",
+  "description": "DSH conversation deletion with an optional, previewed cascade into conversation-associated memory: soft delete + recycle bin, audit trail, batch rate limits and per-session rollback. 删除对话（可选一并删除关联记忆）：软删除与回收站、审计留痕、批量限流、失败回滚。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "config.schema.json",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "INSTALL.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "conversation",
+    "delete",
+    "session",
+    "memory",
+    "recycle-bin",
+    "audit"
+  ],
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "删除对话",
+    "description": "删除对话并可选择一并删除该对话的关联记忆；支持软删除、回收站、审计、批量限流与失败回滚。"
+  },
+  "scripts": {
+    "test": "node test/manifest.test.mjs && node test/client-module.test.mjs && node test/core.test.mjs && node test/cascade.test.mjs && node test/memory.test.mjs && node test/trash-audit.test.mjs && node test/api.test.mjs",
+    "check": "node --check lib/index.js && node --check client.js && node test/manifest.test.mjs"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  }
+}

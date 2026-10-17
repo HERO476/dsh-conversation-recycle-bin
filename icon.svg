@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Delete conversation">
+  <defs>
+    <linearGradient id="lid" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff8a65"/>
+      <stop offset="1" stop-color="#e64a19"/>
+    </linearGradient>
+  </defs>
+  <path d="M14 20h36l-3.2 32.2a6 6 0 0 1-6 5.4H23.2a6 6 0 0 1-6-5.4Z" fill="url(#lid)"/>
+  <path d="M11 18h42a2.5 2.5 0 0 1 0 5H11a2.5 2.5 0 0 1 0-5Z" fill="#bf360c"/>
+  <path d="M24 11h16a4 4 0 0 1 4 4v3H20v-3a4 4 0 0 1 4-4Z" fill="#ffab91"/>
+  <path d="M28 31v18M36 31v18" stroke="#fff" stroke-width="4" stroke-linecap="round" opacity=".9"/>
+  <path d="M46 10c3.3 0 6 2.7 6 6 0 3.2-2.7 5.9-6 5.9h-2.5l-3.5 3v-3H42c-1.1 0-2-1-2-2.1V16c0-3.3 2.7-6 6-6Z" fill="#263238" opacity=".92"/>
+</svg>

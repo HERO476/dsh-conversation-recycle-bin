@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "title": "Delete Conversation",
+    "description": "Delete a conversation with an optional cascade into its associated memory. Soft delete and recycle bin, audit trail, batch rate limits, and per-session rollback."
+  },
+  "section": {
+    "label": "Conversation Deletion",
+    "title": "Conversation Deletion",
+    "subtitle": "Recycle bin, batch deletion and audit trail."
+  },
+  "action": {
+    "menuDelete": "Delete conversation…",
+    "headerDelete": "Delete…",
+    "delete": "Delete",
+    "cancel": "Cancel",
+    "close": "Close",
+    "restore": "Restore",
+    "purge": "Delete permanently",
+    "refresh": "Refresh",
+    "selectAll": "Select all"
+  },
+  "dialog": {
+    "titleOne": "Delete this conversation?",
+    "titleMany": "Delete {count} conversations?",
+    "bodyOne": "\u201c{title}\u201d will be removed from the session list.",
+    "bodyMany": "{count} conversations will be removed from the session list.",
+    "modeSoft": "Move to recycle bin (recommended)",
+    "modeSoftHint": "Files stay on disk and can be restored from the recycle bin.",
+    "modeHard": "Delete permanently",
+    "modeHardHint": "Removes the session log from disk. This cannot be undone after the recycle bin is purged.",
+    "memoryLabel": "Also delete this conversation\u2019s associated memory",
+    "memoryHint": "Off by default. Memory entries are counted before you confirm.",
+    "memoryCount": "{count} associated memory entries will be deleted",
+    "memoryNone": "No associated memory entries were found",
+    "memoryUnsupported": "Memory store not available: {reason}",
+    "memoryProtected": "{count} protected entries are kept",
+    "messages": "{events} records · {size}",
+    "hardWarning": "Type DELETE to confirm permanent deletion.",
+    "batchWarning": "Type the number {count} to confirm this batch.",
+    "batchPhrase": "Batch size",
+    "working": "Deleting…",
+    "done": "Deleted {count} conversation(s).",
+    "partial": "Deleted {done}, failed {failed}.",
+    "memoryDeleted": "{count} memory entries moved to the recycle bin.",
+    "error": "Deletion failed: {message}"
+  },
+  "trash": {
+    "title": "Recycle bin",
+    "empty": "The recycle bin is empty.",
+    "deletedAt": "Deleted {time}",
+    "items": "{sessions} conversations, {memories} memory entries",
+    "restoreDone": "Restored.",
+    "purgeDone": "Permanently deleted.",
+    "confirmPurge": "Permanently delete this entry? This cannot be undone.",
+    "auditTitle": "Audit trail",
+    "auditEmpty": "No deletion has been recorded yet."
+  },
+  "batch": {
+    "title": "Batch deletion",
+    "hint": "Select conversations to delete. Deletion is per-conversation atomic; a failure rolls that conversation back.",
+    "selected": "{count} selected"
+  }
+}

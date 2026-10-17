@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/HERO476/dsh-delete-conversation/config.schema.json",
+  "title": "dsh-delete-conversation configuration",
+  "description": "Host-side configuration for the conversation deletion plugin. The cordis.patch.yml config layer supplies defaults; higher-priority patch layers may override any field. The Host validates this object at activation (normalizeConfig) because this package intentionally does not depend on a schema runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": { "type": "boolean", "default": true, "description": "Master switch. When false the route answers 503 and the UI hides its entries." },
+    "requireSameOrigin": { "type": "boolean", "default": true, "description": "Reject requests whose Origin/Sec-Fetch-Site is not the serving Web GUI." },
+    "allowNonLoopback": { "type": "boolean", "default": false, "description": "Allow requests when the Web server is bound beyond loopback." },
+    "allowOrphanSessions": { "type": "boolean", "default": false, "description": "Allow deleting sessions that no registered workspace owns." },
+    "allowSubagentSessions": { "type": "boolean", "default": false, "description": "Allow deleting sessions whose header origin is 'subagent'." },
+    "stopLiveSessions": { "type": "boolean", "default": true, "description": "Hard deletion first stops a live session (cancel turn + archive stopActivity + bounded drain). Set false to refuse live sessions instead." },
+    "liveDrainMs": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 2000, "description": "How long to wait for a live session's turn to settle before failing the deletion." },
+    "foreignWriterGraceMs": { "type": "integer", "minimum": 0, "maximum": 10000, "default": 1500, "description": "Best-effort guard against a second DSH Host writing the same session log: the newest log mtime is re-checked after this window before a hard delete moves it. 0 disables the guard." },
+    "protectedSessionIds": {
+      "type": "array", "items": { "type": "string" }, "default": [],
+      "description": "Session ids this plugin must never delete, regardless of caller."
+    },
+    "allowedWorkspaceRoots": {
+      "type": "array", "items": { "type": "string" }, "default": [],
+      "description": "When non-empty, a session may only be deleted when its workspace path is inside one of these roots."
+    },
+    "defaultMode": { "enum": ["soft", "hard"], "default": "soft", "description": "Initial mode selected in the confirmation dialog." },
+    "trashRetentionDays": { "type": "number", "minimum": 0, "maximum": 3650, "default": 30, "description": "Informational retention shown in the recycle bin; purging is always explicit." },
+    "maxBatchSessions": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50, "description": "Upper bound on one batch. The effective limit is min(this, remaining deletions in the current minute), so a batch can never exceed the rate budget." },
+    "maxDeletesPerMinute": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 20, "description": "Sliding-window limit for conversation deletions (single and batch items count individually)." },
+    "confirmTokenTtlMs": { "type": "integer", "minimum": 5000, "maximum": 3600000, "default": 120000 },
+    "auditRetentionLines": { "type": "integer", "minimum": 100, "maximum": 1000000, "default": 5000 },
+    "auditMaxBytes": { "type": "integer", "minimum": 65536, "default": 5242880 },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "adapters": {
+          "type": "array",
+          "items": { "enum": ["lingshu", "generic-json", "none"] },
+          "default": ["lingshu", "generic-json", "none"],
+          "description": "Availability probes run in order; every available adapter contributes counts, so overlapping stores can be detected."
+        },
+        "lingshu": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rootDir": { "type": ["string", "null"], "default": null, "description": "md_cg root. null auto-detects <DSH_HOME>/.dsh-memory/data/mdcg." }
+          }
+        },
+        "generic": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "indexFile": { "type": ["string", "null"], "default": null },
+            "rootDir": { "type": ["string", "null"], "default": null },
+            "sessionField": { "type": "string", "default": "session" },
+            "nodesPointer": { "type": "string", "default": "/nodes", "description": "JSON pointer to the node map inside indexFile." }
+          }
+        },
+        "deleteMode": { "enum": ["trash", "keep"], "default": "trash", "description": "trash moves entries into the plugin recycle bin (recoverable); keep only counts and never deletes memory." }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "showRowAction": { "type": "boolean", "default": true, "description": "Show the delete row in the session '…' menu." },
+        "showHeaderAction": { "type": "boolean", "default": true, "description": "Show the delete icon in the conversation header." },
+        "batchDoubleConfirm": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}

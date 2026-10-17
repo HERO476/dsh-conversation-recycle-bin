@@ -1,0 +1,63 @@
+{
+  "meta": {
+    "title": "删除对话",
+    "description": "删除对话，并可选择一并删除该对话的关联记忆；支持软删除、回收站、审计留痕、批量限流与失败回滚。"
+  },
+  "section": {
+    "label": "对话删除",
+    "title": "对话删除",
+    "subtitle": "回收站、批量删除与审计留痕。"
+  },
+  "action": {
+    "menuDelete": "删除对话…",
+    "headerDelete": "删除…",
+    "delete": "删除",
+    "cancel": "取消",
+    "close": "关闭",
+    "restore": "恢复",
+    "purge": "彻底删除",
+    "refresh": "刷新",
+    "selectAll": "全选"
+  },
+  "dialog": {
+    "titleOne": "删除这个对话？",
+    "titleMany": "删除 {count} 个对话？",
+    "bodyOne": "「{title}」将从会话列表中移除。",
+    "bodyMany": "{count} 个对话将从会话列表中移除。",
+    "modeSoft": "移入回收站（推荐）",
+    "modeSoftHint": "文件仍保留在磁盘上，可从回收站恢复。",
+    "modeHard": "彻底删除",
+    "modeHardHint": "从磁盘移除会话日志；回收站清理后不可恢复。",
+    "memoryLabel": "同时删除该对话的关联记忆",
+    "memoryHint": "默认不勾选。确认前会实时统计受影响的记忆条数。",
+    "memoryCount": "将删除 {count} 条关联记忆",
+    "memoryNone": "未找到关联记忆",
+    "memoryUnsupported": "记忆存储不可用：{reason}",
+    "memoryProtected": "另有 {count} 条受保护记忆将保留",
+    "messages": "{events} 条记录 · {size}",
+    "hardWarning": "彻底删除需输入 DELETE 确认。",
+    "batchWarning": "批量删除需输入数字 {count} 确认。",
+    "batchPhrase": "批量数量",
+    "working": "正在删除…",
+    "done": "已删除 {count} 个对话。",
+    "partial": "成功 {done} 个，失败 {failed} 个。",
+    "memoryDeleted": "已移入回收站的记忆条目：{count} 条。",
+    "error": "删除失败：{message}"
+  },
+  "trash": {
+    "title": "回收站",
+    "empty": "回收站为空。",
+    "deletedAt": "删除于 {time}",
+    "items": "{sessions} 个对话、{memories} 条记忆",
+    "restoreDone": "已恢复。",
+    "purgeDone": "已彻底删除。",
+    "confirmPurge": "彻底删除该条目？此操作不可撤销。",
+    "auditTitle": "审计留痕",
+    "auditEmpty": "尚无删除记录。"
+  },
+  "batch": {
+    "title": "批量删除",
+    "hint": "勾选要删除的对话。每个对话独立事务，失败时仅回滚该对话。",
+    "selected": "已选 {count} 个"
+  }
+}
