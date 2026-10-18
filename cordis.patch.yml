@@ -87,3 +87,7 @@
           # auto | smtp | http | off
           transport: auto
           rateLimitPerHour: 5
+          # The form always asks the visitor for their own address and sends it
+          # as Reply-To. Set this to true to also use it as From — only on relays
+          # that allow an arbitrary sender; QQ/163/Gmail reject it.
+          visitorAsFrom: false

@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-recycle-bin",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DSH conversation deletion with an optional, previewed cascade into conversation-associated memory: soft delete + recycle bin, audit trail, batch rate limits and per-session rollback. 删除对话（可选一并删除关联记忆）：软删除与回收站、审计留痕、批量限流、失败回滚。",
   "repository": {
     "type": "git",

@@ -613,26 +613,6 @@ test('client: the active locale is read from the snapshot field the host actuall
   assert.equal(exported.__t('action.delete'), '删除')
 })
 
-test('client: the active locale is read from the snapshot field the host actually uses', async () => {
-  // `dsh-client-locale`'s snapshot is `{ active, locales, revision }`: neither
-  // `locale` nor `id` exists, so reading those fell back to the browser
-  // language and ignored the in-app language switch.
-  const { exported } = await loadClient()
-  exported.apply({
-    slots: {
-      inject(key, callback) { return callback() ?? (() => {}) },
-      register() { return () => {} },
-    },
-    effect(fn) { fn() },
-    get(name) {
-      if (name === 'locale') return { getSnapshot: () => ({ active: 'zh', locales: ['en', 'zh'], revision: 3 }) }
-      return undefined
-    },
-  })
-  assert.equal(exported.__t('section.title'), '对话删除')
-  assert.equal(exported.__t('action.delete'), '删除')
-})
-
 test('client: feedback form validation mirrors the Host limits', async () => {
   const { exported } = await loadClient()
   const limits = exported.__feedbackLimits
@@ -642,7 +622,9 @@ test('client: feedback form validation mirrors the Host limits', async () => {
   assert.equal(exported.__validateFeedbackInput({ title: 'x'.repeat(limits.titleMax + 1), body: 'a body long enough' }).key, 'feedback.tooLongTitle')
   assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'short' }).key, 'feedback.tooShortBody')
   assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'x'.repeat(limits.bodyMax + 1) }).key, 'feedback.tooLongBody')
-  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough', contact: 'x'.repeat(limits.contactMax + 1) }).key, 'feedback.tooLongContact')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough', email: 'not-an-address' }).key, 'feedback.invalidEmail')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough', email: 'a'.repeat(limits.emailMax) + '@example.test' }).key, 'feedback.tooLongEmail')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough', email: 'visitor@example.test' }).ok, true)
   assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough' }).ok, true)
 })
 

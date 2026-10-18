@@ -190,7 +190,7 @@ dsh-conversation-recycle-bin/
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 121 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 122 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -199,7 +199,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（121 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（122 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -236,7 +236,7 @@ npm run check   # 语法 + manifest
 
 ### 9.1 为什么是「页面 → 宿主路由 → 邮件」三段
 
-浏览器既不能开 SMTP 连接，也不该持有邮件服务凭证。因此 `client.js` 只负责表单与校验提示，`POST /conversation-recycle-bin/api/feedback` 由 `lib/host/feedback.js` 校验、渲染并投递。表单里的「类型 / 标题 / 正文 / 联系方式」之外，只额外附带**对话框里已展示给用户**的上下文（插件版本、平台、语言）；对话内容、会话 id、工作区路径都不会进入邮件。
+浏览器既不能开 SMTP 连接，也不该持有邮件服务凭证。因此 `client.js` 只负责表单与校验提示，`POST /conversation-recycle-bin/api/feedback` 由 `lib/host/feedback.js` 校验、渲染并投递。表单里的「类型 / 标题 / 正文 / 你的邮箱」之外，只额外附带**对话框里已展示给用户**的上下文（插件版本、平台、语言）；对话内容、会话 id、工作区路径都不会进入邮件。
 
 ### 9.2 配置项（`feedback` 段，非机密）
 
@@ -247,6 +247,7 @@ npm run check   # 语法 + manifest
 | `feedback.from` | `''` | 发件人。留空时 SMTP 通道复用连接串里的用户名（服务商通常要求 From 与登录账号一致）；`DSH_CRB_FEEDBACK_FROM` 优先于它 |
 | `feedback.transport` | `auto` | `auto` = 有 `DSH_CRB_MAIL_API_URL` 走 http，否则有 `DSH_CRB_SMTP_URL` 走 smtp；`http`/`smtp` 强制单通道（配不全就报未配置，不会静默换道）；`off` 关闭 |
 | `feedback.rateLimitPerHour` | `5` | 每宿主每小时发送上限（1–100）。邮件从操作者自己的账号发出，默认值刻意压低 |
+| `feedback.visitorAsFrom` | `false` | 访客在表单里填的**自己的邮箱**默认只作为 `Reply-To`（并在正文里列出），`From` 仍是发信账号。设为 `true` 时把访客邮箱放进 `From`——只有允许任意发件人的中继才行，QQ/163/Gmail 会拒收（它们要求 From 与登录账号一致） |
 
 ### 9.3 环境变量（优先级高于配置项；凭证只走这里，不进配置文件）
 
@@ -261,7 +262,7 @@ npm run check   # 语法 + manifest
 | `DSH_CRB_MAIL_API_AUTH_HEADER` | 可选，鉴权头名，默认 `authorization`，值为 `Bearer <token>` |
 | `DSH_CRB_SMTP_URL` | SMTP 连接串，如 `smtps://user:pass@smtp.example.com:465` |
 
-HTTP 通道发出的 JSON 固定为 `{from, to: [收件人], subject, text, reply_to}`，`text` 是纯文本（不生成 HTML）；`reply_to` 只在联系方式看起来可用时填写。SMTP 通道按需 `import('nodemailer')`：它已声明为 `optionalDependencies`（`^10.1.2`），正常安装会随包就位；以 `link:` 方式开发安装时插件从自身真实目录解析，需在**本仓库**跑一次 `npm install`。仍未安装时返回 `E_FEEDBACK_TRANSPORT` + `reason: nodemailer-missing`。
+HTTP 通道发出的 JSON 固定为 `{from, to: [收件人], subject, text, reply_to}`，`text` 是纯文本（不生成 HTML）；`reply_to` 取自表单里访客填写的邮箱（留空则不填）。SMTP 通道按需 `import('nodemailer')`：它已声明为 `optionalDependencies`（`^10.1.2`），正常安装会随包就位；以 `link:` 方式开发安装时插件从自身真实目录解析，需在**本仓库**跑一次 `npm install`。仍未安装时返回 `E_FEEDBACK_TRANSPORT` + `reason: nodemailer-missing`。
 
 #### 9.3.1 QQ 邮箱开通示例
 
@@ -286,8 +287,8 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
-node test/feedback.test.mjs        # 15 个反馈用例
-npm test                           # 全量 121 个用例
+node test/feedback.test.mjs        # 17 个反馈用例
+npm test                           # 全量 122 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'
@@ -305,9 +306,10 @@ $env:DSH_CRB_FEEDBACK_TO    = 'feedback@example.test'
 |---|---|---|
 | 设置页没有「反馈」按钮 | 通道未配置（`/state.feedback.enabled === false`） | 设好 `DSH_CRB_MAIL_API_URL` + token，或 `DSH_CRB_SMTP_URL`；确认 `feedback.transport` 不是 `off`、`enabled` 不是 `false` |
 | 点击后 503 `E_FEEDBACK_DISABLED` | 同上一行（按钮来自旧页面渲染） | 刷新页面；看 `/state.feedback.reason`：`not-configured` / `disabled` / `off` |
-| 400 `E_FEEDBACK_INVALID` | 标题 4–120 字、正文 10–4000 字、联系方式 ≤200 字不满足 | `details.field` 指明字段，`details.min`/`details.max` 给出边界 |
+| 400 `E_FEEDBACK_INVALID` | 标题 4–120 字、正文 10–4000 字、邮箱 ≤200 字且必须形如 `a@b.cc` | `details.field` 指明字段，`details.min`/`details.max` 给出边界 |
 | 429 `E_FEEDBACK_RATE_LIMITED` | 超过 `feedback.rateLimitPerHour` | 等 `details.retryAfterMs` 后重试，或调高上限 |
 | 502 `E_FEEDBACK_TRANSPORT` | 邮件服务返回非 2xx / 网络失败 / 未装 nodemailer / 暴露不出 `createTransport` | 看宿主日志 `[conversation-recycle-bin] feedback delivery failed (<transport>): <code> <message>`（只含错误码与通道，不含正文）；核对 URL、token、SMTP 授权码 |
+| 邮件里「发件人」不是访客的邮箱 | 默认只把访客邮箱放进 `Reply-To`（`visitorAsFrom: false`），发信人仍是发信账号 | QQ/163/Gmail 必须如此（From 必须等于登录账号）；换用允许任意发件人的中继后再把 `feedback.visitorAsFrom` 设为 `true` |
 | 接口 200 但收件箱没有 | 服务端已受理，但被对方退信或进了垃圾箱 | 查发件账号退信；`feedback.from` 用与 SMTP 账号一致的地址，并检查收件人域名 |
 
 > 隐私边界：邮件正文 = 用户输入 + 对话框里已展示的上下文；宿主日志只记错误码、通道与耗时。删除开关（`enabled`）与反馈通道互相独立——关掉删除不影响反馈，反之亦然。

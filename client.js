@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
         'dialog.partial': 'Deleted {done}, failed {failed}.',
         'dialog.noSession': 'The conversation no longer exists.',
         'dialog.blocked': 'This conversation cannot be deleted: {message}',
-        'dialog.reloadHint': 'The conversation list refreshes automatically.',
+        'dialog.reloadHint': 'The conversation list refreshes when you close this dialog.',
         'trash.title': 'Recycle bin',
         'trash.empty': 'The recycle bin is empty.',
         'trash.deletedAt': 'Deleted {time}',
@@ -145,6 +145,7 @@ window.__ModuleLoader__.load({
         'state.limits': 'Limits',
         'state.available': 'available',
         'state.unavailable': 'unavailable',
+        'state.notDetected': 'not detected',
         'state.rate': '{used}/{limit} deletions this minute',
         'state.batch': 'Effective batch limit: {limit}',
         'feedback.button': 'Feedback',
@@ -160,10 +161,15 @@ window.__ModuleLoader__.load({
         'feedback.titlePlaceholder': 'One line that summarises it',
         'feedback.bodyLabel': 'Message',
         'feedback.bodyPlaceholder': 'What happened, what you expected, and the steps that led to it.',
-        'feedback.contactLabel': 'Contact (optional)',
-        'feedback.contactPlaceholder': 'An email address or another way to reach you',
+        'feedback.emailLabel': 'Your email (optional)',
+        'feedback.emailPlaceholder': 'you@example.com',
+        'feedback.emailHint': 'Used as Reply-To so the maintainer can answer you. Leave it empty to stay anonymous.',
+        'feedback.emailHintAsFrom': 'Shown as the sender (From) of the mail.',
         'feedback.contextLabel': 'Attached automatically',
         'feedback.contextHint': 'Plugin version, platform and language. Conversation content is never attached.',
+        'feedback.contextVersion': 'Plugin version',
+        'feedback.contextPlatform': 'Platform',
+        'feedback.contextLocale': 'Language',
         'feedback.send': 'Send',
         'feedback.sending': 'Sending…',
         'feedback.sent': 'Feedback sent. Thank you!',
@@ -171,7 +177,8 @@ window.__ModuleLoader__.load({
         'feedback.tooLongTitle': 'The title may be at most {max} characters.',
         'feedback.tooShortBody': 'The message needs at least {min} characters.',
         'feedback.tooLongBody': 'The message may be at most {max} characters.',
-        'feedback.tooLongContact': 'The contact field may be at most {max} characters.',
+        'feedback.invalidEmail': 'That does not look like an email address.',
+        'feedback.tooLongEmail': 'The email address may be at most {max} characters.',
         'feedback.unavailable': 'The feedback channel is not configured on this Host.',
         'error.E_FEEDBACK_DISABLED': 'The feedback channel is not configured on this Host.',
         'error.E_FEEDBACK_INVALID': 'The feedback form is incomplete or too long.',
@@ -252,7 +259,7 @@ window.__ModuleLoader__.load({
         'dialog.partial': '成功 {done} 个，失败 {failed} 个。',
         'dialog.noSession': '该对话已不存在。',
         'dialog.blocked': '该对话无法删除：{message}',
-        'dialog.reloadHint': '会话列表将自动刷新。',
+        'dialog.reloadHint': '关闭本对话框后会刷新会话列表。',
         'trash.title': '回收站',
         'trash.empty': '回收站为空。',
         'trash.deletedAt': '删除于 {time}',
@@ -291,6 +298,7 @@ window.__ModuleLoader__.load({
         'state.limits': '限制',
         'state.available': '可用',
         'state.unavailable': '不可用',
+        'state.notDetected': '未检测到',
         'state.rate': '本分钟已删除 {used}/{limit}',
         'state.batch': '单次上限：{limit} 个（受每分钟额度约束）',
         'feedback.button': '反馈',
@@ -306,10 +314,15 @@ window.__ModuleLoader__.load({
         'feedback.titlePlaceholder': '用一句话概括',
         'feedback.bodyLabel': '正文',
         'feedback.bodyPlaceholder': '发生了什么、预期是什么、如何复现。',
-        'feedback.contactLabel': '联系方式（选填）',
-        'feedback.contactPlaceholder': '邮箱或其他能找到你的方式',
+        'feedback.emailLabel': '你的邮箱（选填）',
+        'feedback.emailPlaceholder': 'you@example.com',
+        'feedback.emailHint': '作为 Reply-To，便于维护者直接回复你；留空即匿名。',
+        'feedback.emailHintAsFrom': '会直接作为这封邮件的发件人。',
         'feedback.contextLabel': '自动附带',
         'feedback.contextHint': '插件版本、平台与语言；不会附带任何对话内容。',
+        'feedback.contextVersion': '插件版本',
+        'feedback.contextPlatform': '平台',
+        'feedback.contextLocale': '语言',
         'feedback.send': '发送',
         'feedback.sending': '正在发送…',
         'feedback.sent': '反馈已发送，谢谢！',
@@ -317,7 +330,8 @@ window.__ModuleLoader__.load({
         'feedback.tooLongTitle': '标题最多 {max} 个字符。',
         'feedback.tooShortBody': '正文至少需要 {min} 个字符。',
         'feedback.tooLongBody': '正文最多 {max} 个字符。',
-        'feedback.tooLongContact': '联系方式最多 {max} 个字符。',
+        'feedback.invalidEmail': '这看起来不是一个邮箱地址。',
+        'feedback.tooLongEmail': '邮箱最多 {max} 个字符。',
         'feedback.unavailable': '当前宿主未配置反馈通道。',
         'error.E_FEEDBACK_DISABLED': '当前宿主未配置反馈通道。',
         'error.E_FEEDBACK_INVALID': '反馈内容不完整或超出长度限制。',
@@ -544,11 +558,14 @@ window.__ModuleLoader__.load({
 
     const flashStore = {
       message: null,
+      timer: null,
       listeners: new Set(),
       show(message) {
+        if (this.timer !== null) clearTimeout(this.timer)
         this.message = message
         for (const listener of this.listeners) listener(this.message)
-        setTimeout(() => {
+        this.timer = setTimeout(() => {
+          this.timer = null
           if (this.message === message) {
             this.message = null
             for (const listener of this.listeners) listener(null)
@@ -650,7 +667,35 @@ window.__ModuleLoader__.load({
 
     function reloadApp(delay = 900) {
       if (typeof window === 'undefined' || typeof window.location?.reload !== 'function') return
-      window.setTimeout(() => window.location.reload(), delay)
+      reloadTimer = window.setTimeout(() => {
+        reloadTimer = null
+        reloadPending = false
+        window.location.reload()
+      }, delay)
+    }
+
+    // A fallback reload is armed when the Host cannot close the deleted
+    // conversation in place. The result dialog is the only place a partial
+    // batch reports its per-session failures, so the reload waits for the user
+    // to dismiss it; the timer is only a safety net for a dialog left open.
+    const RELOAD_FALLBACK_DELAY = 5_000
+    let reloadPending = false
+    let reloadTimer = null
+    // Set when the user dismisses the result dialog. `refreshAfterMutation`
+    // settles after the dialog is already on screen, so the dismissal can
+    // arrive first; the reload then happens at once instead of arming a timer.
+    let reloadDialogDismissed = false
+
+    function takeReloadPending() {
+      const pending = reloadPending
+      reloadPending = false
+      // Cancel the safety-net timer, otherwise dismissing the dialog would
+      // reload once now and once again when the original timer fires.
+      if (pending && reloadTimer !== null) {
+        if (typeof window !== 'undefined') window.clearTimeout?.(reloadTimer)
+        reloadTimer = null
+      }
+      return pending
     }
 
     function service(name) {
@@ -687,7 +732,7 @@ window.__ModuleLoader__.load({
     async function refreshAfterMutation(options = {}) {
       const sessionIds = Array.isArray(options.sessionIds) ? options.sessionIds : []
       const closeCurrent = options.closeCurrent !== false
-      const fallbackDelay = Number.isFinite(options.fallbackDelay) ? options.fallbackDelay : 900
+      const fallbackDelay = Number.isFinite(options.fallbackDelay) ? options.fallbackDelay : RELOAD_FALLBACK_DELAY
       const current = openSessionId()
       const sessions = service('sessions')
       let refreshed = false
@@ -725,7 +770,13 @@ window.__ModuleLoader__.load({
           }
         }
       }
-      if (!refreshed) reloadApp(fallbackDelay)
+      if (!refreshed) {
+        if (reloadDialogDismissed) reloadApp(0)
+        else {
+          reloadPending = true
+          reloadApp(fallbackDelay)
+        }
+      }
       if (options.notify !== false) mutationStore.bump()
       return refreshed
     }
@@ -828,22 +879,29 @@ window.__ModuleLoader__.load({
       titleMax: 120,
       bodyMin: 10,
       bodyMax: 4_000,
-      contactMax: 200,
+      emailMax: 200,
     })
 
+    /** Same loose shape the Host accepts: `a@b.cc`, no whitespace or separators. */
+    const EMAIL_PATTERN = /^[^\s@,;:<>()[\]\\]+@[^\s@,;:<>()[\]\\]+\.[^\s@,;:<>()[\]\\]{2,}$/
+
     /**
-     * @param {{title?: string, body?: string, contact?: string}} input
+     * @param {{title?: string, body?: string, email?: string}} input
      * @returns {{ok: true} | {ok: false, key: string, vars: Record<string, number>}}
      */
     function validateFeedbackInput(input) {
       const title = String(input?.title ?? '').trim()
       const body = String(input?.body ?? '').trim()
-      const contact = String(input?.contact ?? '').trim()
+      const email = String(input?.email ?? '').trim()
       if (title.length < FEEDBACK_LIMITS.titleMin) return { ok: false, key: 'feedback.tooShortTitle', vars: { min: FEEDBACK_LIMITS.titleMin } }
       if (title.length > FEEDBACK_LIMITS.titleMax) return { ok: false, key: 'feedback.tooLongTitle', vars: { max: FEEDBACK_LIMITS.titleMax } }
       if (body.length < FEEDBACK_LIMITS.bodyMin) return { ok: false, key: 'feedback.tooShortBody', vars: { min: FEEDBACK_LIMITS.bodyMin } }
       if (body.length > FEEDBACK_LIMITS.bodyMax) return { ok: false, key: 'feedback.tooLongBody', vars: { max: FEEDBACK_LIMITS.bodyMax } }
-      if (contact.length > FEEDBACK_LIMITS.contactMax) return { ok: false, key: 'feedback.tooLongContact', vars: { max: FEEDBACK_LIMITS.contactMax } }
+      // Same order as the Host (`lib/host/feedback.js:241-250`): shape first,
+      // then length. The reverse told a 300-character address it was "not an
+      // email" while the Host said "too long" for the identical submission.
+      if (email !== '' && !EMAIL_PATTERN.test(email)) return { ok: false, key: 'feedback.invalidEmail', vars: {} }
+      if (email.length > FEEDBACK_LIMITS.emailMax) return { ok: false, key: 'feedback.tooLongEmail', vars: { max: FEEDBACK_LIMITS.emailMax } }
       return { ok: true }
     }
 
@@ -878,6 +936,15 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [phrase, setPhrase] = useState('')
       const [done, setDone] = useState(null)
+
+      // Dismissing the result must also complete a reload the Host armed
+      // because it cannot close the deleted conversation in place; otherwise
+      // the safety-net timer would fire later and reload under the user's feet.
+      function closeDone() {
+        reloadDialogDismissed = true
+        dialogStore.close()
+        if (takeReloadPending()) reloadApp(0)
+      }
       const requestRef = useRef(0)
 
       const load = useCallback(async (nextMode, nextMemory, options = {}) => {
@@ -909,7 +976,9 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         function onKey(event) {
-          if (event.key === 'Escape' && busy !== true) dialogStore.close()
+          // Escape dismisses the result dialog too, so it must release the
+          // armed reload exactly like the Close button does.
+          if (event.key === 'Escape' && busy !== true) closeDone()
         }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
@@ -935,6 +1004,9 @@ window.__ModuleLoader__.load({
 
       async function submit() {
         if (confirmation === null || busy) return
+        // A new submission starts a new result cycle: a dismissal from the
+        // previous one must not force this run's reload to happen at once.
+        reloadDialogDismissed = false
         setBusy(true)
         setError(null)
         try {
@@ -985,7 +1057,10 @@ window.__ModuleLoader__.load({
       }
 
       if (done !== null) {
-        return h('div', { className: 'dc-backdrop' },
+        return h('div', {
+          className: 'dc-backdrop',
+          onMouseDown: (event) => { if (event.target === event.currentTarget) closeDone() },
+        },
           h('div', { className: 'dc-dialog', role: 'dialog', 'aria-modal': 'true' },
             h('h2', { className: 'dc-dialog-title' }, t('dialog.done', { count: done.count, memory: done.memory })),
             done.failed > 0 ? h('p', { className: 'dc-error-text' }, t('dialog.partial', { done: done.count, failed: done.failed })) : null,
@@ -996,7 +1071,7 @@ window.__ModuleLoader__.load({
               : null,
             h('p', { className: 'dc-hint' }, t('dialog.reloadHint')),
             h('div', { className: 'dc-actions' },
-              h(Button, { variant: 'primary', onClick: () => { dialogStore.close() } }, t('action.close')))))
+              h(Button, { variant: 'primary', onClick: () => closeDone() }, t('action.close')))))
       }
 
       return h('div', {
@@ -1103,7 +1178,10 @@ window.__ModuleLoader__.load({
       if (first !== undefined) return adapterReason(first.reason)
       const stores = Array.isArray(memory?.stores) ? memory.stores : []
       const store = stores.find((item) => item.available === false && typeof item.reason === 'string')
-      return store === undefined ? 'not detected' : adapterReason(store.reason)
+      // `not detected` used to be hard-coded English, so a Chinese page showed
+      // `记忆存储不可用：not detected`. Everything else here already routes
+      // through the string table.
+      return store === undefined ? t('state.notDetected') : adapterReason(store.reason)
     }
 
     /* ------------------------------------------------------------------ *
@@ -1124,15 +1202,22 @@ window.__ModuleLoader__.load({
       const [category, setCategory] = useState('bug')
       const [title, setTitle] = useState('')
       const [body, setBody] = useState('')
-      const [contact, setContact] = useState('')
+      const [email, setEmail] = useState('')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(null)
-      const validation = validateFeedbackInput({ title, body, contact })
+      const validation = validateFeedbackInput({ title, body, email })
       const context = collectFeedbackContext()
       // A Host without a mail transport advertises `enabled: false`; the form is
       // still rendered read-only so the explanation is visible instead of a
       // button that fails on click.
       const unavailable = feedback?.enabled !== true
+      // Nothing has been typed on the first render, so the "too short" rule must
+      // not greet the user. It starts applying once the user edits a field OR
+      // leaves one: gating on `dirty` alone left the disabled submit button with
+      // no visible reason for anyone who only tabbed through the form.
+      const [dirty, setDirty] = useState(false)
+      const [touched, setTouched] = useState(false)
+      const validationVisible = (dirty === true || touched === true) && validation.ok !== true
 
       useEffect(() => {
         function onKey(event) {
@@ -1154,7 +1239,7 @@ window.__ModuleLoader__.load({
               category,
               title: title.trim(),
               body: body.trim(),
-              contact: contact.trim(),
+              email: email.trim(),
               context: {
                 pluginVersion: version,
                 platform: context.platform,
@@ -1192,7 +1277,8 @@ window.__ModuleLoader__.load({
             className: 'dc-input',
             value: category,
             disabled: busy,
-            onChange: (event) => setCategory(event.target.value),
+            onBlur: () => setTouched(true),
+            onChange: (event) => { setDirty(true); setCategory(event.target.value) },
           },
           h('option', { value: 'bug' }, t('feedback.categoryBug')),
           h('option', { value: 'suggestion' }, t('feedback.categorySuggestion')),
@@ -1208,7 +1294,8 @@ window.__ModuleLoader__.load({
             placeholder: t('feedback.titlePlaceholder'),
             disabled: busy,
             autoFocus: true,
-            onChange: (event) => setTitle(event.target.value),
+            onBlur: () => setTouched(true),
+            onChange: (event) => { setDirty(true); setTitle(event.target.value) },
           })),
 
         h('label', { className: 'dc-field' },
@@ -1220,30 +1307,34 @@ window.__ModuleLoader__.load({
             maxLength: FEEDBACK_LIMITS.bodyMax,
             placeholder: t('feedback.bodyPlaceholder'),
             disabled: busy,
-            onChange: (event) => setBody(event.target.value),
+            onBlur: () => setTouched(true),
+            onChange: (event) => { setDirty(true); setBody(event.target.value) },
           })),
 
         h('label', { className: 'dc-field' },
-          h('span', { className: 'dc-field-label' }, t('feedback.contactLabel')),
+          h('span', { className: 'dc-field-label' }, t('feedback.emailLabel')),
           h('input', {
-            type: 'text',
+            type: 'email',
             className: 'dc-input',
-            value: contact,
-            maxLength: FEEDBACK_LIMITS.contactMax,
-            placeholder: t('feedback.contactPlaceholder'),
+            value: email,
+            maxLength: FEEDBACK_LIMITS.emailMax,
+            placeholder: t('feedback.emailPlaceholder'),
+            autoComplete: 'email',
             disabled: busy,
-            onChange: (event) => setContact(event.target.value),
-          })),
+            onBlur: () => setTouched(true),
+            onChange: (event) => { setDirty(true); setEmail(event.target.value) },
+          }),
+          h('div', { className: 'dc-hint' }, t(feedback?.visitorAsFrom === true ? 'feedback.emailHintAsFrom' : 'feedback.emailHint'))),
 
         h('div', { className: 'dc-context' },
           h('div', { className: 'dc-context-title' }, t('feedback.contextLabel')),
           h('div', { className: 'dc-hint' }, t('feedback.contextHint')),
           h('ul', { className: 'dc-context-list' },
-            h('li', null, `plugin: ${version === '' ? '—' : version}`),
-            h('li', null, `platform: ${context.platform === '' ? '—' : context.platform}`),
-            h('li', null, `locale: ${context.locale}`))),
+            h('li', null, `${t('feedback.contextVersion')}: ${version === '' ? '—' : version}`),
+            h('li', null, `${t('feedback.contextPlatform')}: ${context.platform === '' ? '—' : context.platform}`),
+            h('li', null, `${t('feedback.contextLocale')}: ${context.locale}`))),
 
-        validation.ok !== true ? h('div', { className: 'dc-hint' }, t(validation.key, validation.vars)) : null,
+        validationVisible ? h('div', { className: 'dc-hint' }, t(validation.key, validation.vars)) : null,
         busy ? h(Spinner, { label: t('feedback.sending') }) : null,
 
         h('div', { className: 'dc-actions' },
@@ -1350,7 +1441,7 @@ window.__ModuleLoader__.load({
      * log) gets a Restore button: `performDiscard` refuses exactly those
      * entries, so without this the only way out was a manual API call.
      */
-    function IncompleteEntries({ entries, discardTarget, discardPhrase, onPhrase, onStart, onCancel, onDiscard, onRestore, restoreBusyId }) {
+    function IncompleteEntries({ entries, discardTarget, discardPhrase, onPhrase, onStart, onCancel, onDiscard, onRestore, restoreBusyId, discardBusyId = null }) {
       return h('div', { className: 'dc-panel dc-incomplete' },
         h('div', { className: 'dc-state-title' }, `${t('trash.incompleteTitle')} (${entries.length})`),
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
@@ -1378,10 +1469,10 @@ window.__ModuleLoader__.load({
                 }),
                 h(Button, {
                   variant: 'danger',
-                  disabled: discardPhrase.trim() !== 'DELETE',
+                  disabled: discardBusyId === entry.trashId || discardPhrase.trim() !== 'DELETE',
                   onClick: () => onDiscard(entry.trashId),
                 }, t('trash.discard')),
-                h(Button, { onClick: onCancel }, t('action.cancel')))
+                h(Button, { disabled: discardBusyId === entry.trashId, onClick: onCancel }, t('action.cancel')))
               : h(Button, {
                 onClick: () => onStart(entry.trashId),
                 title: t('trash.confirmDiscard'),
@@ -1432,8 +1523,17 @@ window.__ModuleLoader__.load({
       const [discardTarget, setDiscardTarget] = useState(null)
       const [discardPhrase, setDiscardPhrase] = useState('')
       const [restoreBusyId, setRestoreBusyId] = useState(null)
+      const [purgeBusy, setPurgeBusy] = useState(false)
+      const [discardBusyId, setDiscardBusyId] = useState(null)
+
+      // Two refreshes can overlap (mount, mutation broadcast, and the refresh a
+      // purge triggers), and the older response must not overwrite the newer.
+      const refreshSerial = useRef(0)
 
       const refresh = useCallback(async () => {
+        const serial = refreshSerial.current + 1
+        refreshSerial.current = serial
+        const stale = () => serial !== refreshSerial.current
         setLoading(true)
         setError(null)
         try {
@@ -1443,6 +1543,7 @@ window.__ModuleLoader__.load({
             api('/trash'),
             api('/audit?limit=50'),
           ])
+          if (stale()) return
           const nextSessions = Array.isArray(sessionsResponse.sessions) ? sessionsResponse.sessions : []
           setState(stateResponse.state)
           setSessions(nextSessions)
@@ -1456,9 +1557,9 @@ window.__ModuleLoader__.load({
             return next.size === current.size ? current : next
           })
         } catch (caught) {
-          setError(caught)
+          if (!stale()) setError(caught)
         } finally {
-          setLoading(false)
+          if (!stale()) setLoading(false)
         }
       }, [])
 
@@ -1515,6 +1616,8 @@ window.__ModuleLoader__.load({
       }
 
       async function purge(trashId, phrase) {
+        if (purgeBusy === true) return
+        setPurgeBusy(true)
         setError(null)
         const entry = trash.find((item) => item.trashId === trashId)
         try {
@@ -1531,10 +1634,14 @@ window.__ModuleLoader__.load({
           })
         } catch (caught) {
           setError(caught)
+        } finally {
+          setPurgeBusy(false)
         }
       }
 
       async function discard(trashId, phrase) {
+        if (discardBusyId !== null) return
+        setDiscardBusyId(trashId)
         setError(null)
         try {
           await api('/trash/discard', { method: 'POST', body: { trashId, confirmPhrase: phrase } })
@@ -1544,6 +1651,8 @@ window.__ModuleLoader__.load({
           await refresh()
         } catch (caught) {
           setError(caught)
+        } finally {
+          setDiscardBusyId(null)
         }
       }
 
@@ -1613,13 +1722,13 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dc-hint' }, t('state.batch', { limit: effectiveBatch > 0 ? effectiveBatch : '—' })))) : null,
 
         h('div', { className: 'dc-tabs', role: 'tablist' },
-          h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'trash', className: `dc-tab${tab === 'trash' ? ' dc-tab-active' : ''}`, onClick: () => setTab('trash') }, t('trash.title')),
-          h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'batch', className: `dc-tab${tab === 'batch' ? ' dc-tab-active' : ''}`, onClick: () => setTab('batch') }, t('batch.title')),
-          h('button', { type: 'button', role: 'tab', 'aria-selected': tab === 'audit', className: `dc-tab${tab === 'audit' ? ' dc-tab-active' : ''}`, onClick: () => setTab('audit') }, t('audit.title'))),
+          h('button', { id: 'dc-tab-trash', type: 'button', role: 'tab', 'aria-selected': tab === 'trash', 'aria-controls': 'dc-panel-trash', className: `dc-tab${tab === 'trash' ? ' dc-tab-active' : ''}`, onClick: () => setTab('trash') }, t('trash.title')),
+          h('button', { id: 'dc-tab-batch', type: 'button', role: 'tab', 'aria-selected': tab === 'batch', 'aria-controls': 'dc-panel-batch', className: `dc-tab${tab === 'batch' ? ' dc-tab-active' : ''}`, onClick: () => setTab('batch') }, t('batch.title')),
+          h('button', { id: 'dc-tab-audit', type: 'button', role: 'tab', 'aria-selected': tab === 'audit', 'aria-controls': 'dc-panel-audit', className: `dc-tab${tab === 'audit' ? ' dc-tab-active' : ''}`, onClick: () => setTab('audit') }, t('audit.title'))),
 
         loading ? h(Spinner, { label: t('dialog.loading') }) : null,
 
-        tab === 'trash' && !loading ? h('div', { className: 'dc-panel' },
+        tab === 'trash' && !loading ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
           trash.length === 0 ? h('div', { className: 'dc-empty' }, t('trash.empty')) : null,
           ...trash.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
@@ -1636,10 +1745,10 @@ window.__ModuleLoader__.load({
                   }),
                   h(Button, {
                     variant: 'danger',
-                    disabled: purgePhrase.trim() !== 'DELETE',
+                    disabled: purgeBusy === true || purgePhrase.trim() !== 'DELETE',
                     onClick: () => { void purge(entry.trashId, purgePhrase.trim()) },
                   }, t('action.purge')),
-                  h(Button, { onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
+                  h(Button, { disabled: purgeBusy === true, onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
                 : h(Button, { variant: 'danger', onClick: () => { setPurgeTarget(entry.trashId); setPurgePhrase('') } }, t('action.purge')))))) : null,
 
         tab === 'trash' && !loading && incomplete.length > 0 ? h(IncompleteEntries, {
@@ -1652,9 +1761,10 @@ window.__ModuleLoader__.load({
           onDiscard: (trashId) => { void discard(trashId, discardPhrase.trim()) },
           onRestore: (trashId) => { void restoreIncomplete(trashId) },
           restoreBusyId,
+          discardBusyId,
         }) : null,
 
-        tab === 'batch' && !loading ? h('div', { className: 'dc-panel' },
+        tab === 'batch' && !loading ? h('div', { id: 'dc-panel-batch', role: 'tabpanel', 'aria-labelledby': 'dc-tab-batch', className: 'dc-panel' },
           h('div', { className: 'dc-batch-bar' },
             h('span', { className: 'dc-hint' }, t('batch.selected', { count: selectedIds.length })),
             // "Select all" only marks deletable rows: a batch containing one
@@ -1680,7 +1790,7 @@ window.__ModuleLoader__.load({
             onToggle: toggle,
           }))) : null,
 
-        tab === 'audit' && !loading ? h('div', { className: 'dc-panel' },
+        tab === 'audit' && !loading ? h('div', { id: 'dc-panel-audit', role: 'tabpanel', 'aria-labelledby': 'dc-tab-audit', className: 'dc-panel' },
           audit.length === 0 ? h('div', { className: 'dc-empty' }, t('audit.empty')) : null,
           ...audit.map((record) => h('div', { key: record.id, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
@@ -1699,10 +1809,10 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
 
     const CSS = `
-/* 1100 sits above the settings modal (z-index 1000 on body) now that the
-   dialog is portaled into the same layer. */
-.dc-backdrop{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);padding:16px}
-.dc-dialog{width:min(560px,94vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1f2329);border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.28);padding:20px 20px 16px;font:inherit}
+/* 1300 clears the settings modal (1000) and the host panels that also use
+   1100, since this backlog shares document.body with them. */
+.dc-backdrop{position:fixed;inset:0;z-index:1300;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);padding:16px}
+.dc-dialog{box-sizing:border-box;width:min(560px,94vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1f2329);border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.28);padding:20px 20px 16px;font:inherit}
 .dc-dialog-title{margin:0 0 8px;font-size:16px;font-weight:600;line-height:1.4}
 .dc-dialog-body{margin:0 0 12px;font-size:13px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.6}
 .dc-section{margin-top:10px}
@@ -1779,7 +1889,7 @@ window.__ModuleLoader__.load({
 .dc-row-title{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dc-row-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
 .dc-row-time{font-size:11px;color:var(--dsw-alias-label-secondary,#646a73);white-space:nowrap}
-.dc-inline-confirm{display:flex;gap:6px;align-items:center}
+.dc-inline-confirm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .dc-batch-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
 .dc-toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:1200;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1f2329);border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;box-shadow:0 10px 30px rgba(0,0,0,.22);padding:9px 14px;font-size:12px;max-width:80vw}
 `

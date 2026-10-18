@@ -3,6 +3,27 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.1] — 2026-10-18
+
+### Added
+
+- **表单改为让用户填写自己的邮箱**：反馈对话框里原来的「联系方式」换成「你的邮箱（选填）」`type="email"` 输入框，客户端与 Host 双重校验（必须是 `a@b.cc` 形状、≤200 字）。格式不合法直接以 `400 E_FEEDBACK_INVALID` + `details.field === 'email'` 拒绝，而不是默默发一封无法回复的邮件。
+- 新增配置项 **`feedback.visitorAsFrom`**（默认 `false`）：访客填写的邮箱默认写入 `Reply-To`，并在正文的 `from / 发件人` 行展示；设为 `true` 时同时作为 `From`——只有允许任意发件人的中继才行，QQ/163/Gmail 会拒收（要求 From 与登录账号一致）。`/state.feedback.visitorAsFrom` 会同步给前端，用于切换输入框下方的提示文案。
+
+### Changed
+
+- 邮件正文上下文字段由 `contact:` 改为 `from / 发件人:` + `reply-to:` 两行；HTTP 通道的 `reply_to` 取自访客邮箱。
+- `test/feedback.test.mjs` 16 → 17 个用例（新增 `resolveSender` 发件人策略单测、非法邮箱拒绝）；`test/client-module.test.mjs` 20 → 19（删除一条逐字节重复的用例外壳，行为覆盖不变），全量仍为 122。`README.md` §9.2 增加 `visitorAsFrom` 行与「发件人不是访客邮箱」排查项；`config.schema.json` / `cordis.patch.yml` 同步新键。
+
+### Fixed
+
+- **删除当前会话后的结果对话框会被兜底刷新抹掉**：Host 无法原地关闭该会话时会 arm 一次兜底刷新，原来是固定 900ms 后 `location.reload()`，弹窗里的「部分失败明细」根本来不及看。现在结果对话框会等用户关闭（按钮 / Escape / 点遮罩）后再刷新，5s 只是对话框被晾着的安全网；关闭时还会 `clearTimeout` 掉安全网计时器，避免关掉之后又被刷一次。对应文案 `dialog.reloadHint` 由「会话列表将自动刷新」改为「关闭本对话框后会刷新会话列表」。
+- **反馈表单的邮箱校验顺序与 Host 相反**：客户端先判超长再判格式，300 字的地址会提示「不是邮箱」，而 Host 对同一次提交回的是「太长」。现在两边统一为「先形状、后长度」（对齐 `lib/host/feedback.js:241-250`）。
+- **「记忆不可用」的原因混进英文硬编码**：无可用存储时 `not detected` 直接拼进中文文案。改用词条 `state.notDetected`（中英各一条）。
+- **反馈表单的校验提示只在「输入过」时出现**：只用 Tab 扫过表单、一个字符没改的用户会看到一个禁用的提交按钮却看不到原因。现在「改过」或「离开过任一字段」（`dirty || touched`）即显示提示。
+- **`noValidate` 挂在 `div` 上**：这是 form 的属性，放在对话框的 `div` 上无效，属误导性死属性，已删除（本组件不含 `<form>`，本身也不会触发原生校验）。
+- **`test/client-module.test.mjs` 里有一条逐字节重复的用例**：同一段 `test('client: the active locale …')` 出现两次（HEAD 即如此），实际独立用例 19 条而计数写 20。删掉重复的一份，覆盖不变。
+
 ## [0.3.0] — 2026-10-18
 
 ### Added
@@ -15,7 +36,7 @@ The format follows Keep a Changelog; the project uses Semantic Versioning.
 
 ### Changed
 
-- `npm test` 增加 `test/feedback.test.mjs`（15 个用例：配置归一化、通道判定、校验/渲染、HTTP 通路、失败状态、限流窗口、未配置、SMTP 缺依赖、两条路由用例），用例总数 106 → 121；`npm run check` 增加 `lib/host/feedback.js` 语法检查。
+- `npm test` 增加 `test/feedback.test.mjs`（16 个用例：配置归一化、通道判定、校验/渲染、HTTP 通路、失败状态、限流窗口、未配置、SMTP 缺依赖、两条路由用例），用例总数 104 → 122（按 `^test(` 逐文件实测校正；本行原写 106 → 121 为陈旧错值）；`npm run check` 增加 `lib/host/feedback.js` 语法检查。
 - `cordis.patch.yml` / `config.schema.json` 增加 `feedback` 默认段（`to` 默认为维护者公开反馈邮箱、`from` 留空、`transport: auto`、`rateLimitPerHour: 5`）。
 
 ## [0.2.2] — 2026-10-18

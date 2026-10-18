@@ -18,6 +18,7 @@ import {
   decodeAddress,
   renderFeedbackMessage,
   resolveFeedbackSettings,
+  resolveSender,
   validateFeedbackPayload,
 } from '../lib/host/feedback.js'
 import { resolveDataPaths } from '../lib/host/paths.js'
@@ -72,6 +73,7 @@ test('config: feedback defaults ship the maintainer inbox and stay inert otherwi
     from: '',
     transport: 'auto',
     rateLimitPerHour: 5,
+    visitorAsFrom: false,
   })
   assert.deepEqual(warnings, [])
 
@@ -182,19 +184,19 @@ test('validation: trims, coerces and refuses bad lengths with a field', () => {
     category: 'suggestion',
     title: '  批量删除后回收站计数不对  ',
     body: '  删除 3 个对话后，回收站只显示 2 条，刷新后恢复。  ',
-    contact: ' user@example.test ',
+    email: ' user@example.test ',
     context: { pluginVersion: '0.2.2', platform: 'x'.repeat(500), secret: 'must be dropped' },
   })
   assert.equal(submission.category, 'suggestion')
   assert.equal(submission.title, '批量删除后回收站计数不对')
-  assert.equal(submission.contact, 'user@example.test')
+  assert.equal(submission.email, 'user@example.test')
   assert.equal(submission.context.pluginVersion, '0.2.2')
   assert.equal(submission.context.platform.length, 200)
   assert.equal('secret' in submission.context, false)
 
   const unknownCategory = validateFeedbackPayload({ title: 'hello world', body: 'a body long enough', category: 'praise' })
   assert.equal(unknownCategory.category, 'other')
-  assert.equal(unknownCategory.contact, null)
+  assert.equal(unknownCategory.email, null)
 
   assert.throws(
     () => validateFeedbackPayload({ title: 'abc', body: 'a body long enough' }),
@@ -209,11 +211,26 @@ test('validation: trims, coerces and refuses bad lengths with a field', () => {
     (error) => error.details.field === 'body' && error.details.max === FEEDBACK_LIMITS.bodyMax,
   )
   assert.throws(
-    () => validateFeedbackPayload({ title: 'long contact', body: 'a body long enough', contact: 'x'.repeat(FEEDBACK_LIMITS.contactMax + 1) }),
-    (error) => error.details.field === 'contact',
+    () => validateFeedbackPayload({ title: 'long address', body: 'a body long enough', email: 'a'.repeat(FEEDBACK_LIMITS.emailMax) + '@example.test' }),
+    (error) => error.details.field === 'email' && error.details.max === FEEDBACK_LIMITS.emailMax,
+  )
+  // A malformed sender address is refused, not silently dropped: the visitor
+  // asked to be reachable, so telling them beats sending an unrepliable mail.
+  assert.throws(
+    () => validateFeedbackPayload({ title: 'bad address', body: 'a body long enough', email: 'not-an-address' }),
+    (error) => error.details.field === 'email' && error.details.max === undefined,
   )
   // A non-object body is a refusal, not a crash.
   assert.throws(() => validateFeedbackPayload('nope'), (error) => error.code === 'E_FEEDBACK_INVALID')
+})
+
+test('sender: the visitor address is Reply-To by default, From only when allowed', () => {
+  const smtpUrl = 'smtps://ops%40example.test:secret@smtp.example.test:465'
+  const base = { from: '', smtpUrl, visitorAsFrom: false }
+  assert.equal(resolveSender(base, { email: 'visitor@example.test' }), 'ops@example.test')
+  assert.equal(resolveSender({ ...base, visitorAsFrom: true }, { email: 'visitor@example.test' }), 'visitor@example.test')
+  assert.equal(resolveSender({ ...base, visitorAsFrom: true }, { email: null }), 'ops@example.test')
+  assert.equal(resolveSender({ from: 'explicit@example.test', smtpUrl, visitorAsFrom: false }, { email: 'visitor@example.test' }), 'explicit@example.test')
 })
 
 test('render: subject carries the title, body carries the visible context only', () => {
@@ -221,7 +238,7 @@ test('render: subject carries the title, body carries the visible context only',
     category: 'bug',
     title: '回收站刷新后丢失条目',
     body: '删除对话后刷新页面，回收站条目消失，但日志还在磁盘上。',
-    contact: 'user@example.test',
+    email: 'user@example.test',
     context: { pluginVersion: PLUGIN_VERSION, locale: 'zh', platform: 'win32', mode: 'desktop' },
   })
   const message = renderFeedbackMessage(submission, { at: Date.UTC(2026, 9, 18, 8, 0, 0) })
@@ -229,7 +246,7 @@ test('render: subject carries the title, body carries the visible context only',
   assert.match(message.subject, /DSH 反馈/)
   assert.match(message.text, new RegExp(`plugin: dsh-conversation-recycle-bin ${PLUGIN_VERSION.replace(/\./g, '\\.')}`))
   assert.match(message.text, /locale: zh/)
-  assert.match(message.text, /contact: user@example\.test/)
+  assert.match(message.text, /reply-to: user@example\.test/)
   assert.match(message.text, /at: 2026-10-18T08:00:00\.000Z/)
   // The rendered mail must stay plain text: no HTML is ever produced.
   assert.equal(/<[a-z/][^>]*>/i.test(message.text), false)
@@ -249,7 +266,7 @@ test('http transport: posts the documented JSON body and reports the transport',
     category: 'bug',
     title: '一个可以复现的问题',
     body: '这就是足够长的正文内容。',
-    contact: 'user@example.test',
+    email: 'user@example.test',
   })
   assert.equal(result.transport, 'http')
   assert.equal(result.deliveredAt, 1_700_000_000_000)

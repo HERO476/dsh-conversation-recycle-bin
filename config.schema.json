@@ -78,7 +78,8 @@
         "to": { "type": "string", "default": "b64:MzQzMzI3NjU3N0BxcS5jb20=", "description": "Target mailbox. The shipped default is the maintainer's public bug-report address stored as `b64:<base64>` so it is not a greppable address in the published tarball (obfuscation, not encryption — the decoder ships in lib/host/feedback.js). Plain addresses work too; DSH_CRB_FEEDBACK_TO wins over this value." },
         "from": { "type": "string", "default": "", "description": "Sender address. Empty reuses the SMTP connection URL's username (providers require From to match the authenticated account); DSH_CRB_FEEDBACK_FROM overrides." },
         "transport": { "enum": ["auto", "smtp", "http", "off"], "default": "auto", "description": "auto = HTTP API when DSH_CRB_MAIL_API_URL is set, otherwise SMTP when DSH_CRB_SMTP_URL is set. http/smtp force one transport; off disables the channel." },
-        "rateLimitPerHour": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Per-Host hourly cap on outgoing feedback mails. Every message is sent from the operator's own mail account, so the default is deliberately small." }
+        "rateLimitPerHour": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5, "description": "Per-Host hourly cap on outgoing feedback mails. Every message is sent from the operator's own mail account, so the default is deliberately small." },
+        "visitorAsFrom": { "type": "boolean", "default": false, "description": "Put the visitor's own address into the From header instead of Reply-To only. The form always asks the visitor for their email and always sets Reply-To; leave this false for QQ/163/Gmail, which refuse a message whose From is not the authenticated account. True works on relays that allow an arbitrary sender." }
       }
     }
   }
