@@ -147,6 +147,36 @@ window.__ModuleLoader__.load({
         'state.unavailable': 'unavailable',
         'state.rate': '{used}/{limit} deletions this minute',
         'state.batch': 'Effective batch limit: {limit}',
+        'feedback.button': 'Feedback',
+        'feedback.bannerTitle': 'Ran into a problem or have an idea?',
+        'feedback.bannerHint': 'Send one email to the maintainer. It carries your text plus the plugin version, platform and language — no conversation content.',
+        'feedback.title': 'Send feedback',
+        'feedback.intro': 'Tell the maintainer what went wrong or what you would like to see. The message is sent by email from this Host; nothing is uploaded anywhere else.',
+        'feedback.categoryLabel': 'Type',
+        'feedback.categoryBug': 'Problem / bug',
+        'feedback.categorySuggestion': 'Suggestion',
+        'feedback.categoryOther': 'Other',
+        'feedback.titleLabel': 'Title',
+        'feedback.titlePlaceholder': 'One line that summarises it',
+        'feedback.bodyLabel': 'Message',
+        'feedback.bodyPlaceholder': 'What happened, what you expected, and the steps that led to it.',
+        'feedback.contactLabel': 'Contact (optional)',
+        'feedback.contactPlaceholder': 'An email address or another way to reach you',
+        'feedback.contextLabel': 'Attached automatically',
+        'feedback.contextHint': 'Plugin version, platform and language. Conversation content is never attached.',
+        'feedback.send': 'Send',
+        'feedback.sending': 'Sending…',
+        'feedback.sent': 'Feedback sent. Thank you!',
+        'feedback.tooShortTitle': 'The title needs at least {min} characters.',
+        'feedback.tooLongTitle': 'The title may be at most {max} characters.',
+        'feedback.tooShortBody': 'The message needs at least {min} characters.',
+        'feedback.tooLongBody': 'The message may be at most {max} characters.',
+        'feedback.tooLongContact': 'The contact field may be at most {max} characters.',
+        'feedback.unavailable': 'The feedback channel is not configured on this Host.',
+        'error.E_FEEDBACK_DISABLED': 'The feedback channel is not configured on this Host.',
+        'error.E_FEEDBACK_INVALID': 'The feedback form is incomplete or too long.',
+        'error.E_FEEDBACK_RATE_LIMITED': 'Several messages were sent recently; try again a little later.',
+        'error.E_FEEDBACK_TRANSPORT': 'The message could not be delivered. Check the Host mail configuration and retry.',
         'error.E_CONFIRM_PHRASE': 'The confirmation phrase does not match.',
         'error.E_CONFIRM_EXPIRED': 'The confirmation expired; the counts were reloaded.',
         'error.E_CONFIRM_INVALID': 'The confirmation is stale; the plan was reloaded.',
@@ -263,6 +293,36 @@ window.__ModuleLoader__.load({
         'state.unavailable': '不可用',
         'state.rate': '本分钟已删除 {used}/{limit}',
         'state.batch': '单次上限：{limit} 个（受每分钟额度约束）',
+        'feedback.button': '反馈',
+        'feedback.bannerTitle': '遇到问题，或有改进建议？',
+        'feedback.bannerHint': '写一条消息发给维护者，正文之外只附带插件版本、平台与语言，不含任何对话内容。',
+        'feedback.title': '发送反馈',
+        'feedback.intro': '把遇到的问题或想要的功能告诉维护者。消息由本机宿主通过邮件发送，不会上传到其他位置。',
+        'feedback.categoryLabel': '类型',
+        'feedback.categoryBug': '问题 / Bug',
+        'feedback.categorySuggestion': '建议',
+        'feedback.categoryOther': '其他',
+        'feedback.titleLabel': '标题',
+        'feedback.titlePlaceholder': '用一句话概括',
+        'feedback.bodyLabel': '正文',
+        'feedback.bodyPlaceholder': '发生了什么、预期是什么、如何复现。',
+        'feedback.contactLabel': '联系方式（选填）',
+        'feedback.contactPlaceholder': '邮箱或其他能找到你的方式',
+        'feedback.contextLabel': '自动附带',
+        'feedback.contextHint': '插件版本、平台与语言；不会附带任何对话内容。',
+        'feedback.send': '发送',
+        'feedback.sending': '正在发送…',
+        'feedback.sent': '反馈已发送，谢谢！',
+        'feedback.tooShortTitle': '标题至少需要 {min} 个字符。',
+        'feedback.tooLongTitle': '标题最多 {max} 个字符。',
+        'feedback.tooShortBody': '正文至少需要 {min} 个字符。',
+        'feedback.tooLongBody': '正文最多 {max} 个字符。',
+        'feedback.tooLongContact': '联系方式最多 {max} 个字符。',
+        'feedback.unavailable': '当前宿主未配置反馈通道。',
+        'error.E_FEEDBACK_DISABLED': '当前宿主未配置反馈通道。',
+        'error.E_FEEDBACK_INVALID': '反馈内容不完整或超出长度限制。',
+        'error.E_FEEDBACK_RATE_LIMITED': '最近已发送多条反馈，请稍后再试。',
+        'error.E_FEEDBACK_TRANSPORT': '邮件发送失败，请检查宿主的邮件配置后重试。',
         'error.E_CONFIRM_PHRASE': '确认短语不匹配。',
         'error.E_CONFIRM_EXPIRED': '确认已过期；计数已重新加载。',
         'error.E_CONFIRM_INVALID': '确认已失效；计划已重新加载。',
@@ -696,6 +756,16 @@ window.__ModuleLoader__.load({
       h('path', { d: 'M20 4v5h-5' }))
     }
 
+    function GlyphFeedback({ size = 14 }) {
+      return h('svg', {
+        width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': 'true',
+      },
+      h('path', { d: 'M4 6h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1Z' }),
+      h('path', { d: 'm3.5 7 8.5 6 8.5-6' }))
+    }
+
     function Button({ children, onClick, variant = 'secondary', disabled = false, type = 'button', title }) {
       return h('button', {
         type,
@@ -743,6 +813,48 @@ window.__ModuleLoader__.load({
         return new Date(value).toLocaleString()
       } catch {
         return String(value)
+      }
+    }
+
+    /* ------------------------------------------------------------------ *
+     * Feedback form (pure helpers, shared with the Host's validation)
+     * ------------------------------------------------------------------ */
+
+    // Mirrors FEEDBACK_LIMITS in `lib/host/feedback.js`. The Host re-validates
+    // every field; this copy only exists to disable the submit button early and
+    // to point at the offending input.
+    const FEEDBACK_LIMITS = Object.freeze({
+      titleMin: 4,
+      titleMax: 120,
+      bodyMin: 10,
+      bodyMax: 4_000,
+      contactMax: 200,
+    })
+
+    /**
+     * @param {{title?: string, body?: string, contact?: string}} input
+     * @returns {{ok: true} | {ok: false, key: string, vars: Record<string, number>}}
+     */
+    function validateFeedbackInput(input) {
+      const title = String(input?.title ?? '').trim()
+      const body = String(input?.body ?? '').trim()
+      const contact = String(input?.contact ?? '').trim()
+      if (title.length < FEEDBACK_LIMITS.titleMin) return { ok: false, key: 'feedback.tooShortTitle', vars: { min: FEEDBACK_LIMITS.titleMin } }
+      if (title.length > FEEDBACK_LIMITS.titleMax) return { ok: false, key: 'feedback.tooLongTitle', vars: { max: FEEDBACK_LIMITS.titleMax } }
+      if (body.length < FEEDBACK_LIMITS.bodyMin) return { ok: false, key: 'feedback.tooShortBody', vars: { min: FEEDBACK_LIMITS.bodyMin } }
+      if (body.length > FEEDBACK_LIMITS.bodyMax) return { ok: false, key: 'feedback.tooLongBody', vars: { max: FEEDBACK_LIMITS.bodyMax } }
+      if (contact.length > FEEDBACK_LIMITS.contactMax) return { ok: false, key: 'feedback.tooLongContact', vars: { max: FEEDBACK_LIMITS.contactMax } }
+      return { ok: true }
+    }
+
+    /** Context the dialog shows before sending; nothing here is user content. */
+    function collectFeedbackContext() {
+      const userAgent = typeof navigator !== 'undefined' && typeof navigator.userAgent === 'string'
+        ? navigator.userAgent
+        : ''
+      return {
+        platform: userAgent.slice(0, 160),
+        locale: currentLocaleId(),
       }
     }
 
@@ -995,6 +1107,155 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ *
+     * Feedback dialog
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Settings page "反馈" button.
+     *
+     * The Host performs the delivery, so the page never holds a mail
+     * credential. The auto-attached context is rendered BEFORE the user
+     * commits, so nothing leaves the machine that they did not see.
+     */
+    function FeedbackDialog({ payload }) {
+      useLocaleTick()
+      const feedback = payload?.feedback ?? null
+      const version = typeof payload?.version === 'string' ? payload.version : ''
+      const [category, setCategory] = useState('bug')
+      const [title, setTitle] = useState('')
+      const [body, setBody] = useState('')
+      const [contact, setContact] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(null)
+      const validation = validateFeedbackInput({ title, body, contact })
+      const context = collectFeedbackContext()
+      // A Host without a mail transport advertises `enabled: false`; the form is
+      // still rendered read-only so the explanation is visible instead of a
+      // button that fails on click.
+      const unavailable = feedback?.enabled !== true
+
+      useEffect(() => {
+        function onKey(event) {
+          if (event.key === 'Escape' && busy !== true) dialogStore.close()
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [busy])
+
+      async function submit() {
+        if (busy || unavailable || validation.ok !== true) return
+        setBusy(true)
+        setError(null)
+        try {
+          await api('/feedback', {
+            method: 'POST',
+            timeoutMs: 30_000,
+            body: {
+              category,
+              title: title.trim(),
+              body: body.trim(),
+              contact: contact.trim(),
+              context: {
+                pluginVersion: version,
+                platform: context.platform,
+                locale: context.locale,
+              },
+            },
+          })
+          flashStore.show(t('feedback.sent'))
+          dialogStore.close()
+        } catch (caught) {
+          // The Host log already records the stable code; this keeps the form
+          // path debuggable from the browser console without a network tab.
+          console.error('[conversation-recycle-bin] feedback submission failed:', caught?.code ?? caught)
+          setError(caught)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', {
+        className: 'dc-backdrop',
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget && busy !== true) dialogStore.close()
+        },
+      },
+      h('div', { className: 'dc-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dc-feedback-title' },
+        h('h2', { id: 'dc-feedback-title', className: 'dc-dialog-title' }, t('feedback.title')),
+        h('p', { className: 'dc-dialog-body' }, t('feedback.intro')),
+        unavailable ? h('div', { className: 'dc-error', role: 'alert' }, t('feedback.unavailable')) : null,
+        h(ErrorBanner, { error }),
+
+        h('label', { className: 'dc-field' },
+          h('span', { className: 'dc-field-label' }, t('feedback.categoryLabel')),
+          h('select', {
+            className: 'dc-input',
+            value: category,
+            disabled: busy,
+            onChange: (event) => setCategory(event.target.value),
+          },
+          h('option', { value: 'bug' }, t('feedback.categoryBug')),
+          h('option', { value: 'suggestion' }, t('feedback.categorySuggestion')),
+          h('option', { value: 'other' }, t('feedback.categoryOther')))),
+
+        h('label', { className: 'dc-field' },
+          h('span', { className: 'dc-field-label' }, t('feedback.titleLabel')),
+          h('input', {
+            type: 'text',
+            className: 'dc-input',
+            value: title,
+            maxLength: FEEDBACK_LIMITS.titleMax,
+            placeholder: t('feedback.titlePlaceholder'),
+            disabled: busy,
+            autoFocus: true,
+            onChange: (event) => setTitle(event.target.value),
+          })),
+
+        h('label', { className: 'dc-field' },
+          h('span', { className: 'dc-field-label' }, t('feedback.bodyLabel')),
+          h('textarea', {
+            className: 'dc-input dc-textarea',
+            value: body,
+            rows: 6,
+            maxLength: FEEDBACK_LIMITS.bodyMax,
+            placeholder: t('feedback.bodyPlaceholder'),
+            disabled: busy,
+            onChange: (event) => setBody(event.target.value),
+          })),
+
+        h('label', { className: 'dc-field' },
+          h('span', { className: 'dc-field-label' }, t('feedback.contactLabel')),
+          h('input', {
+            type: 'text',
+            className: 'dc-input',
+            value: contact,
+            maxLength: FEEDBACK_LIMITS.contactMax,
+            placeholder: t('feedback.contactPlaceholder'),
+            disabled: busy,
+            onChange: (event) => setContact(event.target.value),
+          })),
+
+        h('div', { className: 'dc-context' },
+          h('div', { className: 'dc-context-title' }, t('feedback.contextLabel')),
+          h('div', { className: 'dc-hint' }, t('feedback.contextHint')),
+          h('ul', { className: 'dc-context-list' },
+            h('li', null, `plugin: ${version === '' ? '—' : version}`),
+            h('li', null, `platform: ${context.platform === '' ? '—' : context.platform}`),
+            h('li', null, `locale: ${context.locale}`))),
+
+        validation.ok !== true ? h('div', { className: 'dc-hint' }, t(validation.key, validation.vars)) : null,
+        busy ? h(Spinner, { label: t('feedback.sending') }) : null,
+
+        h('div', { className: 'dc-actions' },
+          h(Button, { onClick: () => dialogStore.close(), disabled: busy }, t('action.cancel')),
+          h(Button, {
+            variant: 'primary',
+            onClick: () => { void submit() },
+            disabled: busy || unavailable || validation.ok !== true,
+          }, busy ? t('feedback.sending') : t('feedback.send')))))
+    }
+
+    /* ------------------------------------------------------------------ *
      * Dialog host / overlay entry
      * ------------------------------------------------------------------ */
 
@@ -1014,8 +1275,15 @@ window.__ModuleLoader__.load({
     function DialogHost() {
       const payload = useDialogState()
       const flash = useFlashMessage()
+      // `kind` is optional: every pre-0.2.2 caller opens a delete dialog, so a
+      // payload without a kind keeps its old meaning.
+      const dialog = payload === null
+        ? null
+        : payload.kind === 'feedback'
+          ? h(FeedbackDialog, { payload, key: payload.key ?? 'feedback' })
+          : h(DeleteDialog, { payload, key: payload.key ?? (payload.sessionIds ?? []).join(',') })
       const content = h(React.Fragment, null,
-        payload === null ? null : h(DeleteDialog, { payload, key: payload.key ?? payload.sessionIds.join(',') }),
+        dialog,
         flash === null ? null : h('div', { className: 'dc-toast', role: 'status' }, flash))
       return portalIntoBody(content)
     }
@@ -1294,13 +1562,34 @@ window.__ModuleLoader__.load({
         : (state?.limits?.maxBatchSessions ?? 0)
       const overLimit = effectiveBatch > 0 && selectedIds.length > effectiveBatch
 
+      const openFeedback = () => dialogStore.open({
+        kind: 'feedback',
+        key: 'feedback',
+        version: typeof state?.version === 'string' ? state.version : '',
+        feedback: state?.feedback ?? null,
+      })
+
       return h('div', { className: 'dc-root' },
+        // Top-of-section call to action, above the title: it is the first thing
+        // a user unsure about the plugin should see. Rendered only when the Host
+        // reports a configured transport, so a profile without mail settings
+        // never shows a button that cannot work (the dialog would otherwise
+        // explain a failure to send).
+        state?.feedback?.enabled === true
+          ? h('div', { className: 'dc-feedback-bar' },
+            h('div', { className: 'dc-feedback-bar-text' },
+              h('div', { className: 'dc-feedback-bar-title' }, t('feedback.bannerTitle')),
+              h('div', { className: 'dc-feedback-bar-hint' }, t('feedback.bannerHint'))),
+            h(Button, { variant: 'primary', title: t('feedback.button'), onClick: openFeedback },
+              h(GlyphFeedback, { size: 14 }), ' ', t('feedback.button')))
+          : null,
         h('div', { className: 'dc-header' },
           h('div', null,
             h('h1', { className: 'dc-title' }, t('section.title')),
             h('p', { className: 'dc-hint' }, t('section.subtitle'))),
-          h(Button, { onClick: () => { void refresh() }, disabled: loading, title: t('action.refresh') },
-            h(GlyphRefresh, { size: 13 }), ' ', t('action.refresh'))),
+          h('div', { className: 'dc-header-actions' },
+            h(Button, { onClick: () => { void refresh() }, disabled: loading, title: t('action.refresh') },
+              h(GlyphRefresh, { size: 13 }), ' ', t('action.refresh')))),
 
         h(ErrorBanner, { error }),
 
@@ -1436,6 +1725,13 @@ window.__ModuleLoader__.load({
 .dc-phrase-label{display:block;font-size:12px;color:var(--dsw-alias-state-warn-primary,#d46b08);margin-bottom:5px;line-height:1.5}
 .dc-input{width:100%;box-sizing:border-box;height:32px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2,#c9cdd4);border-radius:7px;background:var(--dsw-alias-bg-base,#fff);color:inherit;font:inherit;font-size:13px}
 .dc-input-small{width:90px;height:28px}
+.dc-header-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.dc-field{display:flex;flex-direction:column;gap:5px;margin:10px 0}
+.dc-field-label{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1f2329)}
+.dc-textarea{height:auto;min-height:96px;padding:8px 9px;line-height:1.55;resize:vertical}
+.dc-context{margin:12px 0 4px;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
+.dc-context-title{font-size:12px;font-weight:600;margin-bottom:2px}
+.dc-context-list{margin:6px 0 0;padding-left:16px;font-size:11px;line-height:1.7;color:var(--dsw-alias-label-secondary,#646a73);word-break:break-all}
 .dc-actions{display:flex;gap:8px;justify-content:flex-end;align-items:center;margin-top:14px;flex-wrap:wrap}
 .dc-btn{height:30px;padding:0 12px;border-radius:7px;border:1px solid var(--dsw-alias-border-l2,#c9cdd4);background:var(--dsw-alias-bg-layer-1,#f7f8fa);color:var(--dsw-alias-label-primary,#1f2329);font:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .dc-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2,#eff0f2)}
@@ -1459,6 +1755,10 @@ window.__ModuleLoader__.load({
 .dc-header-action{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#646a73);cursor:pointer}
 .dc-header-action:hover{background:var(--dsw-alias-bg-layer-2,#eff0f2);color:var(--dsw-alias-state-error-primary,#d93026)}
 .dc-root{padding:18px 22px 32px;max-width:900px;font:inherit;color:var(--dsw-alias-label-primary,#1f2329)}
+.dc-feedback-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 14px;margin-bottom:16px;border:1px solid var(--dsw-alias-brand-primary,#4d6bfe);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
+.dc-feedback-bar-text{min-width:220px;flex:1 1 auto}
+.dc-feedback-bar-title{font-size:13px;font-weight:600;line-height:1.5}
+.dc-feedback-bar-hint{font-size:12px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.5;margin-top:2px}
 .dc-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:14px}
 .dc-title{font-size:17px;font-weight:600;margin:0}
 .dc-state{display:flex;gap:24px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#f7f8fa);margin-bottom:14px}
@@ -1565,7 +1865,9 @@ window.__ModuleLoader__.load({
     exports.__api = api
     // Direct component handles keep the hook-level behavior testable without a
     // DOM renderer (the registered wrapper alone only builds an element).
-    exports.__components = { DeleteMenuRow, HeaderDeleteAction, DeleteDialog, SettingsSection, IncompleteEntries, BatchSessionRow }
+    exports.__components = { DeleteMenuRow, HeaderDeleteAction, DeleteDialog, SettingsSection, IncompleteEntries, BatchSessionRow, FeedbackDialog }
+    exports.__validateFeedbackInput = validateFeedbackInput
+    exports.__feedbackLimits = FEEDBACK_LIMITS
     exports.__selectableSessionIds = selectableSessionIds
     exports.__adapterLabel = adapterLabel
     exports.__adapterReason = adapterReason

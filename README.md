@@ -188,8 +188,9 @@ dsh-conversation-recycle-bin/
 │     ├─ catalog.js             # archive/detach/pin 与日志移动
 │     ├─ lifecycle.js           # live 会话停机：cancel + archive + drain
 │     ├─ memory.js               # 适配器装配
+│     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 104 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + Client 半渲染冒烟
+└─ test/                        # 121 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -198,7 +199,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && api（104 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（121 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -226,3 +227,87 @@ npm run check   # 语法 + manifest
 5. UI 依赖当前版本的 slot 约定；宿主升级若改 slot props，入口会失效但不会破坏宿主。0.1.4 的原地刷新还会调用 `uiWorkspace.clearArchivedCurrent/clearMain`（宿主 `.d.ts` 中标为 private）；两者都不存在时会退回整页刷新，不会留下过期视图，但属于对私有方法的依赖，宿主升级需复核。
 6. 回收站 manifest 的并发写由 `<dataDir>/mutation.lock` 跨进程锁保护（抢不到锁返回 `E_LOCK_BUSY`）；但**会话日志内容**的跨进程写保护仍是 best-effort：`foreignWriterGraceMs` 只能发现"窗口内仍在增长"的日志，另一个 Host 的空闲 live 会话（两次写入之间）无法被本进程识别。桌面端与 `dsh web` 同时运行时，仍应先关闭另一端的会话再彻底删除。
 7. 未完成条目（failed/pending/restoring/purging）若仍持有已移动的会话日志或记忆文件，出于数据安全不允许 `discard`（会报 `E_TRASH_CONFLICT`）；设置页对这类条目提供「恢复」按钮，可直接恢复回会话列表，不再出现"失败了却没有出口"的死条目。日志与记忆都已不在磁盘上的条目才可以 discard。
+
+---
+
+## 9. 反馈通道（设置页「反馈」按钮）
+
+设置页**最上方**新增一条「反馈」横幅（主色按钮，位于标题之上）：把问题或建议写成一条消息，由**宿主进程**通过邮件发到维护者邮箱。凭证只在宿主侧读取，页面拿不到、也发不出任何邮件。
+
+### 9.1 为什么是「页面 → 宿主路由 → 邮件」三段
+
+浏览器既不能开 SMTP 连接，也不该持有邮件服务凭证。因此 `client.js` 只负责表单与校验提示，`POST /conversation-recycle-bin/api/feedback` 由 `lib/host/feedback.js` 校验、渲染并投递。表单里的「类型 / 标题 / 正文 / 联系方式」之外，只额外附带**对话框里已展示给用户**的上下文（插件版本、平台、语言）；对话内容、会话 id、工作区路径都不会进入邮件。
+
+### 9.2 配置项（`feedback` 段，非机密）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `feedback.enabled` | `true` | 是否允许该通道。通道本身没配好时按钮依旧不显示 |
+| `feedback.to` | `b64:…`（维护者收件箱） | 收件人。默认值以 `b64:<base64>` 形式携带，公开 tarball 里没有可直接抓取的 `name@domain` 串（这是**混淆，不是加密**：解码器就在 `lib/host/feedback.js`，拿到包的人总能解出来）。也接受明文地址；`DSH_CRB_FEEDBACK_TO` 优先于它 |
+| `feedback.from` | `''` | 发件人。留空时 SMTP 通道复用连接串里的用户名（服务商通常要求 From 与登录账号一致）；`DSH_CRB_FEEDBACK_FROM` 优先于它 |
+| `feedback.transport` | `auto` | `auto` = 有 `DSH_CRB_MAIL_API_URL` 走 http，否则有 `DSH_CRB_SMTP_URL` 走 smtp；`http`/`smtp` 强制单通道（配不全就报未配置，不会静默换道）；`off` 关闭 |
+| `feedback.rateLimitPerHour` | `5` | 每宿主每小时发送上限（1–100）。邮件从操作者自己的账号发出，默认值刻意压低 |
+
+### 9.3 环境变量（优先级高于配置项；凭证只走这里，不进配置文件）
+
+> 冲突时**环境变量赢**：`DSH_CRB_FEEDBACK_TO` 覆盖 `feedback.to`，`DSH_CRB_FEEDBACK_FROM` 覆盖 `feedback.from`。这样多台机器/多人共用一个 package 时，各自改环境变量即可，不必改配置。
+
+| 变量 | 用途 |
+|---|---|
+| `DSH_CRB_FEEDBACK_TO` | 收件人（优先于 `feedback.to`） |
+| `DSH_CRB_FEEDBACK_FROM` | 发件人（优先于 `feedback.from`） |
+| `DSH_CRB_MAIL_API_URL` | 邮件 HTTP API 地址（Resend 兼容形状，也可指向自建转发网关） |
+| `DSH_CRB_MAIL_API_TOKEN` | 该 API 的 Bearer token |
+| `DSH_CRB_MAIL_API_AUTH_HEADER` | 可选，鉴权头名，默认 `authorization`，值为 `Bearer <token>` |
+| `DSH_CRB_SMTP_URL` | SMTP 连接串，如 `smtps://user:pass@smtp.example.com:465` |
+
+HTTP 通道发出的 JSON 固定为 `{from, to: [收件人], subject, text, reply_to}`，`text` 是纯文本（不生成 HTML）；`reply_to` 只在联系方式看起来可用时填写。SMTP 通道按需 `import('nodemailer')`：它已声明为 `optionalDependencies`（`^10.1.2`），正常安装会随包就位；以 `link:` 方式开发安装时插件从自身真实目录解析，需在**本仓库**跑一次 `npm install`。仍未安装时返回 `E_FEEDBACK_TRANSPORT` + `reason: nodemailer-missing`。
+
+#### 9.3.1 QQ 邮箱开通示例
+
+QQ 邮箱不能直接用登录密码发信，要先取**授权码**（设置 → 账号 → POP3/SMTP 服务 → 开启 → 生成授权码），再把两件事写进环境变量（`@` 在连接串里必须写成 `%40`；`<你的QQ号>` 换成实际号码）：
+
+```powershell
+setx DSH_CRB_SMTP_URL 'smtps://<你的QQ号>%40qq.com:你的授权码@smtp.qq.com:465'
+# 可选：换收件人/发件人（不设就用包内默认的维护者收件箱）
+setx DSH_CRB_FEEDBACK_TO 'your-feedback@example.com'
+# 设置后重启 DSH 桌面端（setx 只对新进程生效）
+```
+
+需要自己生成一个 `b64:` 地址（放进 profile patch 而不是环境变量时）：
+
+```powershell
+node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').toString('base64'))"
+```
+
+
+### 9.4 本地验证
+
+```powershell
+cd D:\Users\34332\AI\dsh-conversation-recycle-bin
+npm run check                      # 语法 + manifest（含 feedback.js）
+node test/feedback.test.mjs        # 15 个反馈用例
+npm test                           # 全量 121 个用例
+
+# 端到端：用本机收件桩观察真实投递路径，不外发邮件
+$env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'
+$env:DSH_CRB_MAIL_API_TOKEN = 'dev-token'
+$env:DSH_CRB_FEEDBACK_TO    = 'feedback@example.test'
+# 另一个终端起桩：
+# node -e "require('http').createServer((q,s)=>{let b='';q.on('data',c=>b+=c);q.on('end',()=>{console.log(q.method,q.url,b);s.end('{}')})}).listen(9099)"
+```
+
+起桩后打开设置页点「反馈」，填表发送：桩终端应打印 `POST /emails {...}`，页面出现「反馈已发送，谢谢！」。测 SMTP 通路时改设 `DSH_CRB_SMTP_URL`（本仓库已按 `optionalDependencies` 声明 `nodemailer`，先在本仓库 `npm install` 一次；未安装时返回 `E_FEEDBACK_TRANSPORT` + `reason: nodemailer-missing`，这是预期行为）。
+
+### 9.5 失败排查
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 设置页没有「反馈」按钮 | 通道未配置（`/state.feedback.enabled === false`） | 设好 `DSH_CRB_MAIL_API_URL` + token，或 `DSH_CRB_SMTP_URL`；确认 `feedback.transport` 不是 `off`、`enabled` 不是 `false` |
+| 点击后 503 `E_FEEDBACK_DISABLED` | 同上一行（按钮来自旧页面渲染） | 刷新页面；看 `/state.feedback.reason`：`not-configured` / `disabled` / `off` |
+| 400 `E_FEEDBACK_INVALID` | 标题 4–120 字、正文 10–4000 字、联系方式 ≤200 字不满足 | `details.field` 指明字段，`details.min`/`details.max` 给出边界 |
+| 429 `E_FEEDBACK_RATE_LIMITED` | 超过 `feedback.rateLimitPerHour` | 等 `details.retryAfterMs` 后重试，或调高上限 |
+| 502 `E_FEEDBACK_TRANSPORT` | 邮件服务返回非 2xx / 网络失败 / 未装 nodemailer / 暴露不出 `createTransport` | 看宿主日志 `[conversation-recycle-bin] feedback delivery failed (<transport>): <code> <message>`（只含错误码与通道，不含正文）；核对 URL、token、SMTP 授权码 |
+| 接口 200 但收件箱没有 | 服务端已受理，但被对方退信或进了垃圾箱 | 查发件账号退信；`feedback.from` 用与 SMTP 账号一致的地址，并检查收件人域名 |
+
+> 隐私边界：邮件正文 = 用户输入 + 对话框里已展示的上下文；宿主日志只记错误码、通道与耗时。删除开关（`enabled`）与反馈通道互相独立——关掉删除不影响反馈，反之亦然。

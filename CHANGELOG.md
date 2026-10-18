@@ -3,6 +3,21 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.0] — 2026-10-18
+
+### Added
+
+- **设置页「反馈」横幅（`feedback` 配置段 + `POST /conversation-recycle-bin/api/feedback`）**：设置页最上方新增一条「反馈」横幅（主色按钮，位于标题之上；`dc-feedback-bar`），表单含类型（问题 / 建议 / 其他）、标题、正文、可选联系方式，并自动附带插件版本、平台与语言（不含任何对话内容）。提交时按钮进入「正在发送…」禁用态，成功后弹 toast 并关闭对话框，失败按错误码给出可读原因。Host 侧 `lib/host/feedback.js` 负责校验、渲染与投递：标题 4–120 字、正文 10–4000 字、联系方式 ≤200 字（Host 复核，客户端只是提前禁用按钮）；每条反馈每小时默认最多 5 条（`feedback.rateLimitPerHour`），全部从操作者自己的邮箱发出。
+- **两种投递通道，均为环境变量注入凭证**：`http`（`DSH_CRB_MAIL_API_URL` + `DSH_CRB_MAIL_API_TOKEN`，POST JSON）与 `smtp`（`DSH_CRB_SMTP_URL`，按需 `import('nodemailer')`）。`nodemailer` 只声明为 `optionalDependencies`（`^10.1.2`），装不上不影响插件其余功能，缺失时明确返回 `reason: nodemailer-missing`。收件人/发件人由配置项 `feedback.to` / `feedback.from` 给出，**环境变量 `DSH_CRB_FEEDBACK_TO` / `DSH_CRB_FEEDBACK_FROM` 优先于它们**（同一份包被多人/多机使用时不必改配置文件）；`feedback.to` 默认即维护者收件箱，以 `b64:<base64>` 形式随包分发（避免公开 tarball 中出现可被正则抓取的 `name@domain`；属混淆而非加密，解码器在 `lib/host/feedback.js`，明文地址同样可用），`feedback.from` 默认留空并复用 SMTP 连接串里的用户名（服务商要求 From 与登录账号一致）。**任何凭证都不进配置文件、不进代码库**。
+- **反馈通道与删除开关解耦**：`enabled:false` 只关闭删除；`/state.feedback` 单独报告 `enabled`、`transport`、`toConfigured`。通道未配置时设置页不渲染按钮，直接请求也返回 `503 E_FEEDBACK_DISABLED`（带 `reason: not-configured | disabled | off`），而不是在点击后才失败。
+- 新增错误码 `E_FEEDBACK_DISABLED`(503) / `E_FEEDBACK_INVALID`(400) / `E_FEEDBACK_RATE_LIMITED`(429) / `E_FEEDBACK_TRANSPORT`(502)；投递失败只记错误码与 HTTP 状态，**正文、标题、联系方式不进 Host 日志**。
+- **收件地址以 `b64:<base64>` 打包**：默认收件箱不再以明文 `name@domain` 出现在 `cordis.patch.yml` / `config.schema.json` / README / CHANGELOG 中，避免公开 tarball 被正则抓取。这是**混淆而非加密**——解码器 `decodeAddress()` 就在 `lib/host/feedback.js` 里，拿到包的人总能还原；明文地址与环境变量照旧可用。
+
+### Changed
+
+- `npm test` 增加 `test/feedback.test.mjs`（15 个用例：配置归一化、通道判定、校验/渲染、HTTP 通路、失败状态、限流窗口、未配置、SMTP 缺依赖、两条路由用例），用例总数 106 → 121；`npm run check` 增加 `lib/host/feedback.js` 语法检查。
+- `cordis.patch.yml` / `config.schema.json` 增加 `feedback` 默认段（`to` 默认为维护者公开反馈邮箱、`from` 留空、`transport: auto`、`rateLimitPerHour: 5`）。
+
 ## [0.2.2] — 2026-10-18
 
 对 0.2.1 的双环境（桌面/网页）全面审计修复轮。问题编号对应 `AUDIT-2026-10-17-desktop-web.md`；每个问题在该文档中都有平台、复现条件、原因与修复方向的完整记录。

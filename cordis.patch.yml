@@ -71,3 +71,19 @@
           showHeaderAction: true
           # Batch deletion requires typing the batch size in the dialog.
           batchDoubleConfirm: true
+        # Settings page "反馈" call-to-action at the top of the section: email one
+        # message to the maintainer. `to` ships as `b64:<base64>` so the public
+        # tarball carries no greppable address (obfuscation, not encryption; the
+        # decoder is in lib/host/feedback.js). Plain addresses work too, and
+        # DSH_CRB_FEEDBACK_TO / DSH_CRB_FEEDBACK_FROM override it. Credentials are
+        # environment-only, so this file never carries a secret. `from` stays empty
+        # unless you need a specific sender: SMTP reuses the connection URL's
+        # username. Without a configured transport the button is hidden instead of
+        # failing at send time.
+        feedback:
+          enabled: true
+          to: 'b64:MzQzMzI3NjU3N0BxcS5jb20='
+          from: ''
+          # auto | smtp | http | off
+          transport: auto
+          rateLimitPerHour: 5

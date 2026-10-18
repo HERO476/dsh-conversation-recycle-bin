@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-recycle-bin",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "DSH conversation deletion with an optional, previewed cascade into conversation-associated memory: soft delete + recycle bin, audit trail, batch rate limits and per-session rollback. 删除对话（可选一并删除关联记忆）：软删除与回收站、审计留痕、批量限流、失败回滚。",
   "repository": {
     "type": "git",
@@ -35,6 +35,9 @@
   "engines": {
     "node": ">=20"
   },
+  "optionalDependencies": {
+    "nodemailer": "^10.1.2"
+  },
   "license": "MIT",
   "keywords": [
     "dsh",
@@ -53,8 +56,8 @@
     "description": "删除对话并可选择一并删除该对话的关联记忆；支持软删除、回收站、审计、批量限流与失败回滚。"
   },
   "scripts": {
-    "test": "node test/manifest.test.mjs && node test/client-module.test.mjs && node test/core.test.mjs && node test/cascade.test.mjs && node test/memory.test.mjs && node test/trash-audit.test.mjs && node test/api.test.mjs",
-    "check": "node --check lib/index.js && node --check client.js && node test/manifest.test.mjs"
+    "test": "node test/manifest.test.mjs && node test/client-module.test.mjs && node test/core.test.mjs && node test/cascade.test.mjs && node test/memory.test.mjs && node test/trash-audit.test.mjs && node test/feedback.test.mjs && node test/api.test.mjs",
+    "check": "node --check lib/index.js && node --check lib/host/feedback.js && node --check client.js && node test/manifest.test.mjs"
   },
   "dsh": {
     "manifestVersion": 1,

@@ -632,3 +632,55 @@ test('client: the active locale is read from the snapshot field the host actuall
   assert.equal(exported.__t('section.title'), '对话删除')
   assert.equal(exported.__t('action.delete'), '删除')
 })
+
+test('client: feedback form validation mirrors the Host limits', async () => {
+  const { exported } = await loadClient()
+  const limits = exported.__feedbackLimits
+  assert.equal(limits.titleMin, 4)
+  assert.equal(limits.bodyMin, 10)
+  assert.equal(exported.__validateFeedbackInput({ title: 'abc', body: 'a body long enough' }).key, 'feedback.tooShortTitle')
+  assert.equal(exported.__validateFeedbackInput({ title: 'x'.repeat(limits.titleMax + 1), body: 'a body long enough' }).key, 'feedback.tooLongTitle')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'short' }).key, 'feedback.tooShortBody')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'x'.repeat(limits.bodyMax + 1) }).key, 'feedback.tooLongBody')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough', contact: 'x'.repeat(limits.contactMax + 1) }).key, 'feedback.tooLongContact')
+  assert.equal(exported.__validateFeedbackInput({ title: 'ok title', body: 'a body long enough' }).ok, true)
+})
+
+test('client: the feedback dialog renders, and both locales carry its strings', async () => {
+  const { exported } = await loadClient()
+  const element = exported.__components.FeedbackDialog({
+    payload: { kind: 'feedback', version: '0.2.2', feedback: { enabled: true } },
+  })
+  // The backdrop + dialog shape the delete dialog uses, so the overlay layer and
+  // the Escape/backdrop close behave identically.
+  assert.equal(element.type, 'div')
+  assert.equal(element.props.className, 'dc-backdrop')
+
+  const applyWithLocale = async (localeId) => {
+    const loaded = await loadClient()
+    loaded.exported.apply({
+      slots: {
+        inject(key, callback) { return callback() ?? (() => {}) },
+        register() { return () => {} },
+      },
+      effect(fn) { fn() },
+      get(name) {
+        if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+        return undefined
+      },
+    })
+    return loaded.exported
+  }
+  const en = await applyWithLocale('en')
+  assert.equal(en.__t('feedback.button'), 'Feedback')
+  assert.equal(en.__t('feedback.bannerTitle').length > 0, true)
+  assert.equal(en.__t('feedback.sent'), 'Feedback sent. Thank you!')
+  assert.equal(en.__t('error.E_FEEDBACK_TRANSPORT'), 'The message could not be delivered. Check the Host mail configuration and retry.')
+
+  const zh = await applyWithLocale('zh-CN')
+  assert.equal(zh.__t('feedback.button'), '反馈')
+  assert.equal(zh.__t('feedback.bannerTitle'), '遇到问题，或有改进建议？')
+  assert.equal(zh.__t('feedback.title'), '发送反馈')
+  assert.equal(zh.__t('feedback.sent'), '反馈已发送，谢谢！')
+  assert.equal(zh.__t('error.E_FEEDBACK_DISABLED'), '当前宿主未配置反馈通道。')
+})
