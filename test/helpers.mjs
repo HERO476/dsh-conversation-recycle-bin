@@ -70,13 +70,23 @@ export function makeWorkspaceRegistry(initial = []) {
       updatedAt: record.updatedAt ?? new Date().toISOString(),
       sessionIds: [...(record.sessionIds ?? [])],
       async setTitle(title) { this.title = title },
+      // The real Host attaches at the FRONT (`[id, ...sessionIds]`); a
+      // push-attach fake hid the ordering fix in `restorePosition`.
       async attachSession(sessionId) {
-        if (!this.sessionIds.includes(sessionId)) this.sessionIds.push(sessionId)
+        if (!this.sessionIds.includes(sessionId)) this.sessionIds.unshift(sessionId)
         events.push(['attach', sessionId])
       },
+      // The real Host refuses moving a session it does not account for
+      // (`WorkspaceMoveInvalidError`); mirroring that here is what makes the
+      // attach-then-insert order in `restorePosition` load-bearing.
       async insertSessionBefore(sessionId, beforeId) {
         const existing = this.sessionIds.indexOf(sessionId)
-        if (existing !== -1) this.sessionIds.splice(existing, 1)
+        if (existing === -1) {
+          const error = new Error('WorkspaceMoveInvalidError: session is not a member of this workspace')
+          error.name = 'WorkspaceMoveInvalidError'
+          throw error
+        }
+        this.sessionIds.splice(existing, 1)
         const at = beforeId === undefined ? this.sessionIds.length : this.sessionIds.indexOf(beforeId)
         this.sessionIds.splice(at === -1 ? this.sessionIds.length : at, 0, sessionId)
         events.push(['insert', sessionId, beforeId ?? null])
@@ -96,6 +106,11 @@ export function makeWorkspaceRegistry(initial = []) {
   return {
     events,
     globalState,
+    // The catalog ops read archive/pin state through these getters (the same
+    // surface `workspaceRegistry` exposes); without them `isArchived()` was
+    // always false and the restore un-archive step silently never ran.
+    get archivedSessionIds() { return [...globalState.archived] },
+    get pinnedSessionIds() { return [...globalState.pinned] },
     list: () => [...workspaces.values()],
     get: (id) => workspaces.get(id),
     create: async (path, title) => makeWorkspace({ id: `ws-${workspaces.size + 1}`, path, title }),
@@ -120,7 +135,7 @@ export function makeWorkspaceRegistry(initial = []) {
 }
 
 /** Minimal request/response pair for the route handler. */
-export function makeHttpPair({ method = 'POST', path = '/', headers = {}, body = null, host = '127.0.0.1:14968' }) {
+export function makeHttpPair({ method = 'POST', path = '/', headers = {}, body = null, host = '127.0.0.1:14968', abortBody = false }) {
   const request = new EventEmitter()
   request.method = method
   request.url = path
@@ -143,8 +158,14 @@ export function makeHttpPair({ method = 'POST', path = '/', headers = {}, body =
   }
   const done = new Promise((resolve) => { response.onDone = resolve })
 
-  // Emit the body asynchronously, exactly like a real stream.
+  // Emit the body asynchronously, exactly like a real stream. `abortBody`
+  // models a client that disconnects mid-body: `aborted` fires and `end`
+  // never does, which used to leave the body promise unsettled forever.
   queueMicrotask(() => {
+    if (abortBody === true) {
+      request.emit('aborted')
+      return
+    }
     const payload = body === null ? '' : (typeof body === 'string' ? body : JSON.stringify(body))
     if (payload !== '') request.emit('data', payload)
     request.emit('end')

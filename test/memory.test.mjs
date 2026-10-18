@@ -92,7 +92,47 @@ test('lingshu adapter: restore rebuilds the index and content exactly', async ()
   }
 })
 
-test('lingshu adapter: a foreign fresh lock makes the operation fail cleanly (no lost update)', async () => {
+test('lingshu adapter: the store lock is neither consulted nor deleted', async () => {
+  const store = await makeStore()
+  const trashDir = join(store.root, 'trash')
+  try {
+    const adapter = createLingshuAdapter({ rootDir: store.root })
+    // md_cg's lock is a permanent zero-byte file guarded by an OS byte-range
+    // lock. Treating its existence as a lock (or deleting it) was the bug.
+    const storeLock = `${join(store.root, '_index.json')}.lock`
+    await writeFile(storeLock, '', 'utf8')
+    const bundle = await adapter.exportSession(SESSION_2, trashDir)
+    assert.equal(bundle.count, 2)
+    assert.equal(await readFile(storeLock, 'utf8'), '')
+  } finally {
+    await store.cleanup()
+  }
+})
+
+test('lingshu adapter: a conversation with no linked memory takes no plugin lock', async () => {
+  const store = await makeStore()
+  const trashDir = join(store.root, 'trash')
+  try {
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'lingshu',
+      label: 'test',
+      indexFile: join(store.root, '_index.json'),
+      rootDir: store.root,
+      lockTimeoutMs: 80,
+    })
+    const held = `${join(store.root, '_index.json')}.conversation-recycle-bin.lock`
+    await writeFile(held, JSON.stringify({ pid: process.pid, nonce: 'held', at: Date.now() }), 'utf8')
+    const bundle = await adapter.exportSession('session-99999999-no-memory', trashDir)
+    assert.equal(bundle.count, 0)
+    assert.equal(bundle.entries.length, 0)
+    // The fast path must not wait for (or remove) a lock it will not use.
+    assert.match(await readFile(held, 'utf8'), /"nonce":"held"/)
+  } finally {
+    await store.cleanup()
+  }
+})
+
+test('lingshu adapter: a private lock held by a live owner fails cleanly, not forever', async () => {
   const store = await makeStore()
   try {
     const adapter = createJsonIndexMemoryAdapter({
@@ -100,17 +140,19 @@ test('lingshu adapter: a foreign fresh lock makes the operation fail cleanly (no
       label: 'test',
       indexFile: join(store.root, '_index.json'),
       rootDir: store.root,
-      useStoreLock: true,
-      lockTimeoutMs: 60,
+      lockTimeoutMs: 120,
       staleLockMs: 600_000,
     })
-    await writeFile(`${join(store.root, '_index.json')}.lock`, 'busy', 'utf8')
+    const held = `${join(store.root, '_index.json')}.conversation-recycle-bin.lock`
+    await writeFile(held, JSON.stringify({ pid: process.pid, nonce: 'held', at: Date.now() }), 'utf8')
+    const started = Date.now()
     await assert.rejects(adapter.exportSession(SESSION_1, join(store.root, 'trash')), (error) => {
-      assert.equal(error.code, 'E_MEMORY_FAILED')
-      assert.match(error.message, /busy/)
+      assert.equal(error.code, 'E_LOCK_BUSY')
+      assert.match(error.message, /held by another process/)
       return true
     })
-    // Store untouched.
+    // The wait budget is honored: no silent infinite loop.
+    assert.ok(Date.now() - started < 5_000)
     const index = JSON.parse(await readFile(join(store.root, '_index.json'), 'utf8'))
     assert.equal(Object.keys(index.nodes).length, 6)
   } finally {
@@ -118,7 +160,7 @@ test('lingshu adapter: a foreign fresh lock makes the operation fail cleanly (no
   }
 })
 
-test('lingshu adapter: a conversation with no linked memory does not need the store lock', async () => {
+test('lingshu adapter: a stale private lock is broken instead of blocking forever', async () => {
   const store = await makeStore()
   const trashDir = join(store.root, 'trash')
   try {
@@ -127,71 +169,57 @@ test('lingshu adapter: a conversation with no linked memory does not need the st
       label: 'test',
       indexFile: join(store.root, '_index.json'),
       rootDir: store.root,
-      useStoreLock: true,
-      lockTimeoutMs: 60,
-      staleLockMs: 600_000,
+      lockTimeoutMs: 500,
+      staleLockMs: 1_000,
     })
-    // A stale foreign lock (e.g. left by a crashed memory writer) must not make
-    // deleting a conversation with zero linked memories fail.
-    await writeFile(`${join(store.root, '_index.json')}.lock`, '', 'utf8')
-    const bundle = await adapter.exportSession('session-99999999-no-memory', trashDir)
-    assert.equal(bundle.count, 0)
-    assert.equal(bundle.entries.length, 0)
-    assert.equal(await readFile(`${join(store.root, '_index.json')}.lock`, 'utf8'), '')
-  } finally {
-    await store.cleanup()
-  }
-})
-
-test('lingshu adapter: an ownerless stale lock is broken instead of blocking forever', async () => {
-  const store = await makeStore()
-  const trashDir = join(store.root, 'trash')
-  try {
-    const adapter = createJsonIndexMemoryAdapter({
-      id: 'lingshu',
-      label: 'test',
-      indexFile: join(store.root, '_index.json'),
-      rootDir: store.root,
-      useStoreLock: true,
-      lockTimeoutMs: 60,
-      staleLockMs: 600_000,
-      ownerlessLockStaleMs: 1_000,
-    })
-    const lock = `${join(store.root, '_index.json')}.lock`
-    await writeFile(lock, '', 'utf8')
+    const held = `${join(store.root, '_index.json')}.conversation-recycle-bin.lock`
+    await writeFile(held, JSON.stringify({ pid: 999_999, nonce: 'dead', at: 1 }), 'utf8')
     const old = new Date(Date.now() - 60_000)
-    await utimes(lock, old, old)
+    await utimes(held, old, old)
     const bundle = await adapter.exportSession(SESSION_2, trashDir)
     assert.equal(bundle.count, 2)
-    await assert.rejects(readFile(lock), { code: 'ENOENT' })
+    await assert.rejects(readFile(held), { code: 'ENOENT' })
   } finally {
     await store.cleanup()
   }
 })
 
-test('lingshu adapter: a fresh ownerless lock is waited out, not failed early', async () => {
+test('lingshu adapter: a failed export removes its untracked bundle directory', async () => {
   const store = await makeStore()
   const trashDir = join(store.root, 'trash')
   try {
+    const { rename, writeFile: writeFileBase } = await import('node:fs/promises')
+    const fsApi = {
+      ...(await import('node:fs/promises')),
+      rename,
+      async writeFile(file, ...rest) {
+        // The index snapshot and the bundle are allowed; the md_cg shard is
+        // the failing step, which happens AFTER the index was rewritten.
+        if (String(file).includes('_index_log')) throw new Error('disk full')
+        return writeFileBase(file, ...rest)
+      },
+    }
     const adapter = createJsonIndexMemoryAdapter({
       id: 'lingshu',
       label: 'test',
       indexFile: join(store.root, '_index.json'),
       rootDir: store.root,
-      useStoreLock: true,
-      // The caller's timeout is shorter than the ownerless grace; the adapter
-      // must extend the wait for a zero-byte lock instead of failing at 60ms.
-      lockTimeoutMs: 60,
-      staleLockMs: 600_000,
-      ownerlessLockStaleMs: 150,
+      indexLogDir: join(store.root, '_index_log'),
+      fsApi,
     })
-    const lock = `${join(store.root, '_index.json')}.lock`
-    await writeFile(lock, '', 'utf8')
-    const bundle = await adapter.exportSession(SESSION_2, trashDir)
-    assert.equal(bundle.count, 2)
-    await assert.rejects(readFile(lock), { code: 'ENOENT' })
+    await assert.rejects(adapter.exportSession(SESSION_1, trashDir), (error) => {
+      assert.equal(error.code, 'E_MEMORY_FAILED')
+      return true
+    })
+    // Index and content are back; the failed bundle is gone, so an incomplete
+    // trash entry can be discarded later.
+    const index = JSON.parse(await readFile(join(store.root, '_index.json'), 'utf8'))
+    assert.equal(Object.keys(index.nodes).length, 6)
+    assert.match(await readFile(join(store.root, 'contextual', 'n1.md'), 'utf8'), /n1\.md/)
+    await assert.rejects(readFile(join(trashDir, 'memory', 'lingshu', 'bundle.json')), { code: 'ENOENT' })
   } finally {
     await store.cleanup()
+    await rm(trashDir, { recursive: true, force: true })
   }
 })
 
@@ -234,3 +262,100 @@ test('memory service: overlapping stores are counted once and protected totals a
     await store.cleanup()
   }
 })
+
+test('lingshu adapter: export appends tombstones and restored records to the md_cg shard log', async () => {
+  const store = await makeStore()
+  const trashDir = join(store.root, 'trash')
+  const shardDir = join(store.root, '_index_log')
+  try {
+    const adapter = createLingshuAdapter({ rootDir: store.root })
+    const bundle = await adapter.exportSession(SESSION_1, trashDir)
+    assert.equal(bundle.count, 3)
+
+    const readShard = async () => {
+      const { readdir } = await import('node:fs/promises')
+      const files = (await readdir(shardDir)).filter((name) => name.endsWith('.log'))
+      const records = []
+      for (const file of files) {
+        for (const line of (await readFile(join(shardDir, file), 'utf8')).split('\n')) {
+          if (line.trim() !== '') records.push(JSON.parse(line))
+        }
+      }
+      // md_cg replays the merged log in `_t` order, so the observable "last
+      // write" is the greatest `_t` — not the last file in directory order.
+      return records.sort((left, right) => (left._t ?? 0) - (right._t ?? 0))
+    }
+
+    const afterExport = await readShard()
+    const tombstoned = afterExport.filter((record) => record.e === null).map((record) => record.id).sort()
+    assert.deepEqual(tombstoned, ['n1', 'n2', 'n5'])
+    // The peer whose references were stripped is re-recorded with the new value.
+    const peer = afterExport.find((record) => record.id === 'n6')
+    assert.ok(peer !== undefined)
+    assert.deepEqual(peer.e.depends_on, [])
+
+    await adapter.restoreBundle(bundle)
+    const afterRestore = await readShard()
+    const restored = afterRestore.filter((record) => record.e !== null && ['n1', 'n2', 'n5'].includes(record.id))
+    assert.equal(new Set(restored.map((record) => record.id)).size, 3)
+    const restoredPeer = afterRestore.filter((record) => record.id === 'n6' && record.e !== null).at(-1)
+    assert.deepEqual(restoredPeer.e.depends_on, ['n1'])
+  } finally {
+    await store.cleanup()
+    await rm(trashDir, { recursive: true, force: true })
+  }
+})
+
+test('memory service: a multi-adapter restore keeps every bundle until all adapters succeed', async () => {
+  const root = join(process.cwd(), 'test', '.tmp', `multi-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`)
+  const aDir = join(root, 'a')
+  const bDir = join(root, 'b')
+  const aBundle = join(aDir, 'bundle.json')
+  const bBundle = join(bDir, 'bundle.json')
+  await mkdir(aDir, { recursive: true })
+  await mkdir(bDir, { recursive: true })
+  await writeFile(aBundle, JSON.stringify({ format: 1, entries: [{ nodeId: 'a1' }] }), 'utf8')
+  await writeFile(bBundle, JSON.stringify({ format: 1, entries: [{ nodeId: 'b1' }] }), 'utf8')
+  try {
+    const calls = []
+    let failB = true
+    const adapter = (id, restore) => ({
+      id,
+      label: id,
+      async probe() { return { available: true, reason: null, storePath: `/fake/${id}` } },
+      async countSessions() { return { counts: new Map(), protected: 0 } },
+      async exportSession() { return null },
+      async restoreBundle(bundle) { await restore(bundle) },
+    })
+    const service = createMemoryService({
+      adapters: [
+        adapter('a', async () => { calls.push('a') }),
+        adapter('b', async () => {
+          if (failB) throw new Error('store busy')
+          calls.push('b')
+        }),
+      ],
+      config: normalizeConfig({}).value,
+    })
+    const summary = {
+      total: 2,
+      adapters: [
+        { id: 'a', bundlePath: aBundle },
+        { id: 'b', bundlePath: bBundle },
+      ],
+    }
+    await assert.rejects(service.restoreEntry(summary), /store busy/)
+    // Nothing was removed: the retry can still read both manifests.
+    assert.match(await readFile(aBundle, 'utf8'), /a1/)
+    assert.match(await readFile(bBundle, 'utf8'), /b1/)
+    failB = false
+    calls.length = 0
+    await service.restoreEntry(summary)
+    assert.deepEqual(calls, ['b', 'a'])
+    await assert.rejects(readFile(aBundle), { code: 'ENOENT' })
+    await assert.rejects(readFile(bBundle), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 })
+  }
+})
+

@@ -64,7 +64,7 @@ cordis_inspect_query platform=client provider=Slots method=listSubTree input={"r
 6. 批量删除：勾选 2 个以上会话，批量**软删除**必须输入数量；批量彻底删除无需输入；超过当前有效上限（`min(maxBatchSessions, 本分钟剩余额度)`）时按钮禁用并提示上限，超过限流返回可读的 429 文案；
 7. 无权限：对未登记工作区的会话，确认框显示不可删除原因；
 8. 设置页「审计留痕」能看到成功/失败/回滚记录；
-9. 若回收站下方出现「未完成条目」，点「清理」并输入 `DELETE` 应移除该条目；仍持有会话日志的条目会被拒绝并提示改用恢复/彻底删除。
+9. 若回收站下方出现「未完成条目」：仍持有会话日志的条目会显示「恢复」按钮，点它可直接恢复回会话列表；确实已无日志与记忆的条目才可「清理」（输入 `DELETE`）。两类入口都在设置页内，不需要手工调 API。
 
 > 无法控制浏览器时，安装与槽位注册只能证明「入口已挂载」，不能证明视觉效果；请如实记录这一限制。
 
@@ -107,6 +107,7 @@ plugin_manager action=remove_bundle target=dsh-conversation-recycle-bin
 | `E_POLICY_ORPHAN` | 会话未登记到任何工作区。确属要删时在配置中 `allowOrphanSessions: true`，或先在工作区里登记 |
 | `E_POLICY_LIVE` | 配置了 `stopLiveSessions: false` 且会话仍活跃；或插件在 `liveDrainMs` 内无法停住该会话（仍在运行）。改为默认配置，或等该会话空闲后重试 |
 | `E_POLICY_FOREIGN_WRITER` | 另一个 DSH Host（桌面端或 `dsh web`）仍在写这个会话日志。先关闭那一端的会话再重试；`foreignWriterGraceMs` 只能降低窗口，不能替代关闭写入方 |
+| `E_LOCK_BUSY` | 另一个 Host 进程正持有 `<DSH_HOME>/delete-conversation/mutation.lock`（桌面端与 `dsh web` 同时运行、或上一次删除仍在跨进程等待）。同一 `DSH_HOME` 下只应有一个 Host 执行删除；确认没有在途删除后重试即可 |
 | `memory.adapters` 全部 unavailable | 本机没有可识别的记忆存储；检查 `<DSH_HOME>/.dsh-memory/data/mdcg/_index.json` 是否存在且 `schema === 2` |
 | 删除返回 `E_TRANSACTION_FAILED` 且 `rolledBack: true` | 事务已回滚，数据未丢。看审计 `rollback.errors` 定位失败阶段（memory/messages/session） |
 | 升级 DSH 后删除失败 | 先跑测试；确认会话目录仍为 `<DSH_HOME>/sessions/<slug>/<id>/`、`_index.json` 仍为 schema 2；必要时在测试会话上验证后再用 |

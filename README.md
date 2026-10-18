@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.2.0`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.2.2`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -23,6 +23,7 @@
 | 对话框落点 | 菜单项随下拉菜单卸载；对话框必须挂在根级 overlay | `shell.overlay` 里的 `DialogHost`，菜单项只写模块级 dialog store |
 | Client→Host | 生成式 `ctx.remote.*` 在构建期固定，纯 JS 插件无法新增命名空间；Client `ctx.connection` 没有 `fetch`；推荐 Host `ctx.webServer.register({kind:'prefix', path, handler})` + 同源 `fetch(document.baseURI)` | 自定义路由 `/conversation-recycle-bin/api/*` |
 | 路由鉴权 | Web server 本身不鉴权；官方插件用 `ctx.connection.requestRejection(req)` 兜底。本插件另加：同源校验、loopback 默认、私有无头 header、JSON content-type、体积上限 | 见 `lib/host/api.js#requestOriginVerdict` |
+| 桌面/网页传输差异 | 桌面端页面源是特权 scheme `dsh-app://app`（安装包 `out/lib/main.js` 注册），Renderer 对 Host 的请求经外壳 `forwardWebRequest` 转发：**删掉 `origin`/`sec-fetch-site`/`host` 头**并附上 Host 签发的 cookie；网页端是同源 fetch，三个头都在 | Client 一律用 `document.baseURI` 相对路径：桌面走 `dsh-app://app/...` 由外壳转发，网页走同源直连；Origin 完整性校验（主机名+端口）实际约束的是网页路径，桌路径由外壳自己的 `origin === "dsh-app://app"` 闸门 + cookie 保证 |
 | Agent 工具 | 用户授权类操作应保持 user-only（skill `user-actions`） | **不注册任何 agent tool**，模型无法执行或授权删除 |
 
 **操作者模型**：DSH 是本地单用户应用，没有账号/角色系统。因此本插件把「操作者权限」落实在传输层（同源页面、默认仅 loopback、私有请求头）与数据归属策略（工作区登记、允许根目录、受保护 id、子代理来源、live 状态）上，而不是虚构一套用户体系。
@@ -95,12 +96,13 @@ memory  →  messages  →  session/catalog
 
 1. `POST /preview`：校验 session 存在、工作区归属、是否受保护/子代理/超出允许根；hard 模式下活跃会话不再拒绝，而是给出「会先停止该会话」的 warning（`stopLiveSessions:false` 时仍拒绝）。随后统计日志条数与记忆数，签发**单次使用**确认 token（绑定排序后的 sessionIds + includeMemory + mode，TTL 默认 120s）。
 2. `POST /delete`：
-   - 同源/loopback/私有 header 校验；
+   - 传输层依次过三道闸：本路由自身的 loopback/Origin（比较完整 authority：主机名**和**有效端口，桌面 `dsh-app://app` 外壳源按 DSH 自己的口径豁免）/私有 header 校验 → DSH `connection.requestRejection`（401/403 短路）→ `ctx.waterfall('connection/request', ...)`（桌面更新任务借此在安装更新时返回 503 并排空在途请求，删除事务不会被杀在半路）；
    - token（彻底删除无需短语；批量软删除校验数量）、**有效批量上限** `min(maxBatchSessions, 本分钟剩余额度)`、限流（默认 20 次/分钟，滑动窗口）全部通过后才消费 token；
    - 先对**全部**会话做策略预检，任一被拒绝则整批不执行（不会半成功）；
    - 逐会话执行 `quiesce(live) → memory → messages → session/catalog` 事务；
+   - 所有 mutation（delete/restore/purge/discard）串行经过进程内链 + `<dataDir>/mutation.lock` 跨进程文件锁：桌面端与 `dsh web` 共享一个 `DSH_HOME` 时，第二个实例的并发删除会拿到 `E_LOCK_BUSY` 而不是写坏同一份 manifest；
    - 返回 `{ok: true, partial, results, failures}`：`ok` 表示计划已执行，`partial` 表示有会话失败；只有**全部**失败时才抛首个错误（HTTP 状态来自 `ERROR_STATUS`，错误码保留真实策略码）。
-3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging））、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志的条目会被拒绝）。
+3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging））、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志的条目应走「恢复」而不是 discard）。未完成条目若还留着会话日志，设置页会给出「恢复」按钮，可以直接把它恢复回会话列表。
 4. `GET /audit?limit=N`。
 
 ### 4.2 安全清单
@@ -109,7 +111,8 @@ memory  →  messages  →  session/catalog
 |---|---|
 | 误删 | 默认软删除；记忆复选框默认关；回收站；彻底删除一键但仍写回收站可恢复；批量软删除需输入数量 |
 | 批量误操作 | `maxBatchSessions`（实际上限还会被本分钟剩余额度收紧，避免"合法批量必然 429"）；批量需输入数量；每个会话独立事务 |
-| 暴力/脚本调用 | 同源校验 + `x-conversation-recycle-bin: 1` 私有 header + 限流；默认仅接受 loopback 绑定，`allowNonLoopback=false` |
+| 暴力/脚本调用 | 同源校验（完整 authority：主机名+有效端口）+ `x-conversation-recycle-bin: 1` 私有 header + DSH `connection` 层（`requestRejection` + `connection/request` 瀑布流）+ 限流；默认仅接受 loopback 绑定，`allowNonLoopback=false` |
+| 两个 Host 并发写同一回收站 | mutation 串行 + `<dataDir>/mutation.lock` 跨进程文件锁，抢不到锁返回 `E_LOCK_BUSY`（而非写坏 manifest） |
 | 越权/越界 | 不在工作区登记的会话默认拒绝；可配置允许根目录白名单；受保护 id 列表；子代理会话默认拒绝 |
 | 活跃会话被写坏 | hard 模式对 live 会话先走 `quiesce`：取消当前轮次 → `archiveSession({stopActivity:true})` → 在 `liveDrainMs` 内等待 `running=false`，之后才移动日志；仍停不下来则整笔回滚并报 `E_POLICY_LIVE`。`stopLiveSessions:false` 可恢复为直接拒绝 |
 | 另一个 Host 正在写 | 移动前按 `foreignWriterGraceMs` 复检日志 mtime；仍在增长则报 `E_POLICY_FOREIGN_WRITER`。best-effort：两端同时运行时仍应先关闭另一端的会话 |
@@ -132,7 +135,7 @@ memory  →  messages  →  session/catalog
       files/<nodeId>.content
 ```
 
-`manifest.status` 只允许 `pending → trashed → restoring/restored / purging`；崩溃在 `pending` 的条目不会出现在回收站 UI，也不会被自动恢复。恢复顺序是删除的逆序：日志 → catalog → 记忆。
+`manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 
 ---
 
@@ -141,7 +144,8 @@ memory  →  messages  →  session/catalog
 ### 5.1 灵枢（默认，已实机核对格式）
 
 - 计数：读 `_index.json`，按 `nodes[*].session === sessionId` 过滤；`protected === true` 或 `immutable === true` 的节点只计数、不删除。
-- 删除：持 `_index.json.lock`（与 md_cg 写入方同一把锁，避免丢更新），把节点正文移到回收站 bundle，从索引删除节点，并剥离其他节点指向被删节点的 `edges/depends_on/derived_from` 引用；先写 bundle 再改索引，失败时还原。**没有任何可删节点的会话会先读索引直接返回空 bundle，不取锁**，因此记忆库繁忙/遗留锁不会拖住一次本来无记忆可删的彻底删除；0 字节无主锁超过 5s 视为崩溃遗留并清除。
+- 删除：持插件私有锁 `_index.json.conversation-recycle-bin.lock`（**不碰** md_cg 的 `_index.json.lock`——那是 md_cg 的永久 0 字节 OS 字节锁文件，存在与否不代表加锁，删它反而会破坏 md_cg 自己的互斥；本锁只协调本插件的多个 Host 进程），把节点正文移到回收站 bundle，从索引删除节点，并剥离其他节点指向被删节点的 `edges/depends_on/derived_from` 引用；先写 bundle 再改索引，失败时还原。**没有任何可删节点的会话会先读索引直接返回空 bundle，不取锁**，因此记忆库繁忙不会拖住一次本来无记忆可删的彻底删除。
+- 分片日志：md_cg 的索引是「快照 `_index.json` + `_index_log/` 追加分片，装载时重放」。删除/恢复除改写快照外，还会写入一个**新分片**（`e: null` 墓碑 / 恢复后的节点记录），`_t` 取「现在」与「最新分片时间 + 1ms」的较大值，保证重放时我们的记录排在最后，已删节点不会因重放复活、已恢复节点不会被旧墓碑覆盖。
 - 恢复：按 bundle 把正文放回、节点条目与引用补回；若目标 id 已存在则拒绝并报 `E_TRASH_CONFLICT`。
 - **边界**：这是「离线索引适配器」，不经过灵枢的 `forget` 工具，因此不会写它的 `_deletions.jsonl` 墓碑、`trash/` 与 review queue；`_recent.jsonl` 滚动窗口里的旧文本会自然过期。对格式做的是 schema 2 的受支持子集。若要求走灵枢自己的软删/审计语义，请使用 `lingshu_cg op=forget`（可能进入 review queue，需校验 receipt），本插件不冒充该协议。
 
@@ -164,8 +168,8 @@ dsh-conversation-recycle-bin/
 ├─ package.json                 # bundle + dsh.client 声明
 ├─ cordis.patch.yml             # Host 行与默认配置
 ├─ config.schema.json           # 配置/权限的机器可读声明
-├─ client.js                    # Web Client：4 个槽位 + 确认框 + 设置页
-├─ icon.svg / locale/{en,zh}.json
+├─ client.js                    # Web Client：4 个槽位 + 确认框 + 设置页（内联中英文案）
+├─ icon.svg
 ├─ lib/
 │  ├─ index.js                  # apply(ctx, config)：注册路由
 │  ├─ core/                     # 纯逻辑（无 DSH 依赖，可单测）
@@ -185,7 +189,7 @@ dsh-conversation-recycle-bin/
 │     ├─ lifecycle.js           # live 会话停机：cancel + archive + drain
 │     ├─ memory.js               # 适配器装配
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 84 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + Client 半渲染冒烟
+└─ test/                        # 104 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + Client 半渲染冒烟
 ```
 
 ---
@@ -194,7 +198,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && api（84 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && api（104 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -220,5 +224,5 @@ npm run check   # 语法 + manifest
 3. 灵枢适配器不写其删除台账（§5.1）；跨节点引用只处理 `edges/depends_on/derived_from` 三个已知字段。
 4. 投影缓存清理是 best-effort；旧日志/附件按宿主语义保留。
 5. UI 依赖当前版本的 slot 约定；宿主升级若改 slot props，入口会失效但不会破坏宿主。0.1.4 的原地刷新还会调用 `uiWorkspace.clearArchivedCurrent/clearMain`（宿主 `.d.ts` 中标为 private）；两者都不存在时会退回整页刷新，不会留下过期视图，但属于对私有方法的依赖，宿主升级需复核。
-6. 跨进程写保护是 best-effort：`foreignWriterGraceMs` 只能发现"窗口内仍在增长"的日志；另一个 Host 的空闲 live 会话（两次写入之间）无法被本进程识别。桌面端与 `dsh web` 同时运行时，仍应先关闭另一端的会话再彻底删除。
-7. 回收站里 `restoring`/`purging` 且仍持有已移动会话日志的条目，出于数据安全不允许 `discard`；需按 INSTALL 的排障步骤手工处理（UI 会显示状态并给出提示）。
+6. 回收站 manifest 的并发写由 `<dataDir>/mutation.lock` 跨进程锁保护（抢不到锁返回 `E_LOCK_BUSY`）；但**会话日志内容**的跨进程写保护仍是 best-effort：`foreignWriterGraceMs` 只能发现"窗口内仍在增长"的日志，另一个 Host 的空闲 live 会话（两次写入之间）无法被本进程识别。桌面端与 `dsh web` 同时运行时，仍应先关闭另一端的会话再彻底删除。
+7. 未完成条目（failed/pending/restoring/purging）若仍持有已移动的会话日志或记忆文件，出于数据安全不允许 `discard`（会报 `E_TRASH_CONFLICT`）；设置页对这类条目提供「恢复」按钮，可直接恢复回会话列表，不再出现"失败了却没有出口"的死条目。日志与记忆都已不在磁盘上的条目才可以 discard。

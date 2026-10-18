@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-recycle-bin",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DSH conversation deletion with an optional, previewed cascade into conversation-associated memory: soft delete + recycle bin, audit trail, batch rate limits and per-session rollback. 删除对话（可选一并删除关联记忆）：软删除与回收站、审计留痕、批量限流、失败回滚。",
   "repository": {
     "type": "git",
@@ -18,7 +18,6 @@
     "./client": "./client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
-    "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
@@ -26,11 +25,11 @@
     "client.js",
     "cordis.patch.yml",
     "config.schema.json",
-    "locale/*.json",
     "icon.svg",
     "README.md",
     "INSTALL.md",
     "CHANGELOG.md",
+    "AUDIT-2026-10-17-desktop-web.md",
     "LICENSE"
   ],
   "engines": {

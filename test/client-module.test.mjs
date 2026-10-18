@@ -31,7 +31,7 @@ function makeReact() {
   }
 }
 
-async function loadClient() {
+async function loadClient({ withReactDom = false } = {}) {
   const registrations = []
   let exported = null
   let moduleId = null
@@ -41,6 +41,14 @@ async function loadClient() {
     parentNode: { removeChild() {} },
     setAttribute(name, value) { this.attrs[name] = value },
   }
+  const body = {}
+  const portalCalls = []
+  const reactDomStub = {
+    createPortal: (element, container) => {
+      portalCalls.push({ element, container })
+      return { type: 'portal', element, container }
+    },
+  }
   globalThis.window = {
     __ModuleLoader__: {
       load(definition) {
@@ -48,6 +56,12 @@ async function loadClient() {
         moduleId = definition.id
         exported = definition.factory((name) => {
           if (name === 'react') return makeReact()
+          // The Client probes for react-dom instead of requiring it, so a host
+          // without ReactDOM still boots. `withReactDom` models the real shell.
+          if (name === 'react-dom') {
+            if (withReactDom !== true) throw new Error('react-dom is not available')
+            return reactDomStub
+          }
           throw new Error(`unexpected require(${name})`)
         })
       },
@@ -56,6 +70,7 @@ async function loadClient() {
   globalThis.document = {
     createElement: () => style,
     head: { appendChild() {} },
+    body,
   }
   globalThis.window.location = {
     reload() { globalThis.__clientReloads = (globalThis.__clientReloads ?? 0) + 1 },
@@ -63,7 +78,7 @@ async function loadClient() {
   globalThis.window.setTimeout = (fn) => { fn(); return 0 }
   const module = await import(`../client.js?cache=${Date.now()}`)
   void module
-  return { exported, registrations, style, moduleId }
+  return { exported, registrations, style, moduleId, body, portalCalls }
 }
 
 test('client: module id equals the package name the boot graph keys rows by', async () => {
@@ -373,4 +388,247 @@ test('client: incomplete recycle-bin entries render with a discard action', asyn
   assert.ok(row !== undefined)
   const actions = row.children.find((child) => child?.props?.className === 'dc-row-actions')
   assert.ok(actions !== undefined)
+})
+
+test('client: the dialog is portaled into document.body to escape the overlay stacking context', async () => {
+  const { exported, registrations, body, portalCalls } = await loadClient({ withReactDom: true })
+  const slots = {
+    inject(key, callback) { return callback() ?? (() => {}) },
+    register(options, component) { registrations.push({ options, component }); return () => {} },
+  }
+  exported.apply({ slots, effect(fn) { fn() }, get() { return undefined } })
+  const overlay = registrations.find((entry) => entry.options.name === 'shell.overlay')
+  // The registered component builds the element; rendering it runs DialogHost.
+  const render = () => {
+    const element = overlay.component({})
+    return element.type(element.props)
+  }
+
+  // Nothing open: an empty portal, no dialog element inside.
+  exported.__store.dialogStore.close()
+  const empty = render()
+  assert.equal(empty.type, 'portal')
+  assert.deepEqual(empty.element.children, [null, null])
+
+  exported.__store.dialogStore.open({
+    sessionIds: ['session-aaaaaaaa-1111'],
+    displayTitle: 'Alpha',
+    key: 'portal-test',
+  })
+  const tree = render()
+  // The backdrop lives on `document.body`, so the settings modal (also
+  // z-index 1000, on body) can no longer swallow the dialog's first click.
+  assert.equal(tree.type, 'portal')
+  assert.equal(tree.container, body)
+  assert.equal(tree.element.children[0].type, exported.__components.DeleteDialog)
+  assert.equal(portalCalls.length, 2)
+  exported.__store.dialogStore.close()
+})
+
+test('client: a host without react-dom still renders the overlay inline', async () => {
+  const { exported, registrations, portalCalls } = await loadClient({ withReactDom: false })
+  const slots = {
+    inject(key, callback) { return callback() ?? (() => {}) },
+    register(options, component) { registrations.push({ options, component }); return () => {} },
+  }
+  exported.apply({ slots, effect(fn) { fn() }, get() { return undefined } })
+  const overlay = registrations.find((entry) => entry.options.name === 'shell.overlay')
+  exported.__store.dialogStore.open({ sessionIds: ['session-aaaaaaaa-1111'], displayTitle: 'Alpha', key: 'inline' })
+  const element = overlay.component({})
+  const tree = element.type(element.props)
+  assert.notEqual(tree.type, 'portal')
+  assert.equal(portalCalls.length, 0)
+  exported.__store.dialogStore.close()
+})
+
+test('client: an incomplete entry that still holds its log offers a restore action', async () => {
+  const { exported } = await loadClient()
+  const restored = []
+  const tree = exported.__components.IncompleteEntries({
+    entries: [
+      { trashId: 'abc-1', sessionId: 'session-bbbbbbbb-2222', status: 'failed', updatedAt: Date.now(), memory: 0, hasSessionLog: true },
+      { trashId: 'abc-2', sessionId: 'session-cccccccc-3333', status: 'pending', updatedAt: Date.now(), memory: 0, hasSessionLog: false },
+    ],
+    discardTarget: null,
+    discardPhrase: '',
+    onPhrase() {},
+    onStart() {},
+    onCancel() {},
+    onDiscard() {},
+    onRestore: (trashId) => restored.push(trashId),
+    restoreBusyId: null,
+  })
+  const rows = tree.children.filter((child) => child?.props?.className === 'dc-row')
+  assert.equal(rows.length, 2)
+
+  // The restore button is identified by its tooltip, so a discard button in
+  // the same row cannot satisfy the search.
+  const restoreTitle = exported.__t('trash.restoreIncompleteHint')
+  const findButton = (node, title) => {
+    if (node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = findButton(item, title)
+        if (found !== null) return found
+      }
+      return null
+    }
+    if (node.props?.title === title) return node
+    for (const child of node.children ?? []) {
+      const found = findButton(child, title)
+      if (found !== null) return found
+    }
+    return null
+  }
+
+  // Row 1 holds the log: a restore button, and it calls back with the id.
+  const restoreButton = findButton(rows[0], restoreTitle)
+  assert.ok(restoreButton !== null, 'the entry with a session log has no restore button')
+  restoreButton.props.onClick()
+  assert.deepEqual(restored, ['abc-1'])
+
+  // Row 2 holds nothing: discard only, no restore button.
+  assert.equal(findButton(rows[1], restoreTitle), null)
+})
+
+test('client: the batch picker disables rows the Host refuses and says why', async () => {
+  const { exported } = await loadClient()
+  const blocked = exported.__components.BatchSessionRow({
+    session: {
+      id: 'session-cccccccc-3333',
+      title: 'Orphan chat',
+      cwd: 'D://Unregistered',
+      updatedAt: Date.now(),
+      deletable: false,
+      policy: { ok: false, code: 'E_POLICY_ORPHAN', message: '该对话不属于任何已登记工作区。' },
+    },
+    checked: false,
+    onToggle() {},
+  })
+  assert.match(blocked.props.className, /dc-disabled/)
+  const checkbox = blocked.children[0]
+  assert.equal(checkbox.props.disabled, true)
+  const hint = blocked.children[1].children[1]
+  assert.match(hint.children[0], /无法删除/)
+  assert.match(hint.children[0], /E_POLICY_ORPHAN|不属于任何已登记工作区/)
+
+  const allowed = exported.__components.BatchSessionRow({
+    session: { id: 'session-aaaaaaaa-1111', title: 'Alpha chat', cwd: 'D://Work', updatedAt: Date.now(), deletable: true, policy: { ok: true } },
+    checked: true,
+    onToggle() {},
+  })
+  assert.doesNotMatch(allowed.props.className, /dc-disabled/)
+  assert.equal(allowed.children[0].props.disabled, false)
+
+  // "Select all" marks exactly the rows the Host has not vetoed.
+  assert.deepEqual(
+    exported.__selectableSessionIds([
+      { id: 'a', deletable: true },
+      { id: 'b', deletable: false },
+      { id: 'c' },
+    ]),
+    ['a', 'c'],
+  )
+})
+
+test('client: ui flags carry the Host defaultMode instead of a hard-coded soft start', async () => {
+  const { exported } = await loadClient()
+  const originalFetch = globalThis.fetch
+  try {
+    // Without a real page there is nothing to ask; the harness models one.
+    globalThis.document.baseURI = 'http://127.0.0.1:14968/'
+    globalThis.fetch = async () => ({
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          state: { enabled: true, defaultMode: 'hard', ui: { showRowAction: true, showHeaderAction: false } },
+        }
+      },
+    })
+    await exported.__loadUiFlags()
+    const flags = exported.__store.uiFlagsStore.flags
+    assert.equal(flags.defaultMode, 'hard')
+    assert.equal(flags.showHeaderAction, false)
+
+    // A state without the field (older Host) stays on the safe default.
+    globalThis.fetch = async () => ({ ok: true, async json() { return { ok: true, state: { enabled: true, ui: {} } } } })
+    exported.__store.uiFlagsStore.loaded = false
+    await exported.__loadUiFlags()
+    assert.equal(exported.__store.uiFlagsStore.flags.defaultMode, 'soft')
+  } finally {
+    globalThis.fetch = originalFetch
+    delete globalThis.document.baseURI
+  }
+})
+
+test('client: adapter labels and reasons are localized, not raw Host ids', async () => {
+  const applyWithLocale = async (localeId) => {
+    const { exported } = await loadClient()
+    exported.apply({
+      slots: {
+        inject(key, callback) { return callback() ?? (() => {}) },
+        register() { return () => {} },
+      },
+      effect(fn) { fn() },
+      get(name) {
+        if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+        return undefined
+      },
+    })
+    return exported
+  }
+  // The locale service is probed once per module instance, so each language
+  // gets a fresh client — exactly like a fresh page load in the real host.
+  const en = await applyWithLocale('en')
+  assert.equal(en.__adapterLabel({ id: 'lingshu', label: '灵枢认知图 (md_cg)' }), 'Lingshu cognitive graph (md_cg)')
+  assert.equal(en.__adapterReason('no-memory-store'), 'No conversation-linked memory store was detected.')
+  // Unknown ids fall back to the Host's own text rather than a blank cell.
+  assert.equal(en.__adapterLabel({ id: 'mystery', label: 'Mystery store' }), 'Mystery store')
+  assert.equal(en.__adapterReason('some-future-reason'), 'some-future-reason')
+
+  const zh = await applyWithLocale('zh-CN')
+  assert.equal(zh.__adapterLabel({ id: 'lingshu', label: 'lingshu (md_cg)' }), '灵枢认知图 (md_cg)')
+  assert.equal(zh.__adapterLabel({ id: 'none', label: 'none' }), '无记忆存储')
+  assert.equal(zh.__adapterReason('no-memory-store'), '未检测到与对话关联的记忆存储。')
+})
+
+test('client: the active locale is read from the snapshot field the host actually uses', async () => {
+  // `dsh-client-locale`'s snapshot is `{ active, locales, revision }`: neither
+  // `locale` nor `id` exists, so reading those fell back to the browser
+  // language and ignored the in-app language switch.
+  const { exported } = await loadClient()
+  exported.apply({
+    slots: {
+      inject(key, callback) { return callback() ?? (() => {}) },
+      register() { return () => {} },
+    },
+    effect(fn) { fn() },
+    get(name) {
+      if (name === 'locale') return { getSnapshot: () => ({ active: 'zh', locales: ['en', 'zh'], revision: 3 }) }
+      return undefined
+    },
+  })
+  assert.equal(exported.__t('section.title'), '对话删除')
+  assert.equal(exported.__t('action.delete'), '删除')
+})
+
+test('client: the active locale is read from the snapshot field the host actually uses', async () => {
+  // `dsh-client-locale`'s snapshot is `{ active, locales, revision }`: neither
+  // `locale` nor `id` exists, so reading those fell back to the browser
+  // language and ignored the in-app language switch.
+  const { exported } = await loadClient()
+  exported.apply({
+    slots: {
+      inject(key, callback) { return callback() ?? (() => {}) },
+      register() { return () => {} },
+    },
+    effect(fn) { fn() },
+    get(name) {
+      if (name === 'locale') return { getSnapshot: () => ({ active: 'zh', locales: ['en', 'zh'], revision: 3 }) }
+      return undefined
+    },
+  })
+  assert.equal(exported.__t('section.title'), '对话删除')
+  assert.equal(exported.__t('action.delete'), '删除')
 })

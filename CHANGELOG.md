@@ -3,6 +3,57 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.2.2] — 2026-10-18
+
+对 0.2.1 的双环境（桌面/网页）全面审计修复轮。问题编号对应 `AUDIT-2026-10-17-desktop-web.md`；每个问题在该文档中都有平台、复现条件、原因与修复方向的完整记录。
+
+### Security
+
+- **删除路由接入 DSH `connection` 门禁（P1-1）**：插件路由此前完全绕过 `connection.admit()` 与 `connection/request` 瀑布流——桌面端安装更新或退出时，更新任务只排空经过 `/api` 的在途请求，一个耗时删除会被直接截断。现在变更路由先过 `ctx.connection.requestRejection(req)`（401/403 短路），再进 `ctx.waterfall('connection/request', …)`：桌面更新门禁借此返回 503 并等待在途变更，删除事务不会被杀在半路。
+- **跨进程 mutation 锁（P1-6）**：桌面端与 `dsh web` 共享同一个 `<DSH_HOME>/delete-conversation/` 时，两个 Host 可能同时读改写 manifest 与审计。所有 mutation（delete/restore/purge/discard）现在在进程内串行链之外再抢 `<dataDir>/mutation.lock` 跨进程文件锁（`{pid,nonce,at}` 注册 + 心跳 + stale 判定，nonce 匹配才删除）；抢不到锁返回可读的 `E_LOCK_BUSY`，而不是写坏同一份 manifest。
+- **同源校验比较完整 authority（P3-4）**：原先只比主机名，`http://127.0.0.1:3000` 的 Origin 与 `Host: 127.0.0.1:8080` 会被判同源。现在比较主机名 + 有效端口（缺失端口按 Origin 自身 scheme 归一），「同源校验」名实相符。
+- **错误详情脱敏（P2-10）**：`DeleteError.details` 里的绝对路径（`indexFile`/`lockFile`/`from`/`to`/ENOENT 文案等）不再原样进入客户端响应，只保留 basename 级信息，与「客户端只拿计数与状态、不拿文件句柄」的契约对齐；Host 日志侧不变。
+
+### Fixed
+
+- **灵枢锁协议不兼容：请求可能永不返回（P0-1）**：适配器把「锁文件存在」当锁（`open(lockPath,'wx')`），而 md_cg 的 `FileLock` 是 OS 级建议锁、锁文件永远是 0 字节且从不删除——只要灵枢跑过一次，`wx` 必然 `EEXIST`；判 stale 后进入一条既无 sleep、又在超时判断之前的忙循环，Windows 上请求永不返回并堵死整个 mutation 队列（本机审计里连续 3 次 hard+记忆删除因此回滚）。现在改用插件私有锁 `_index.json.conversation-recycle-bin.lock`：pid/nonce 注册、心跳续期、stale 判定、忙等超时（`E_LOCK_BUSY`），**永不触碰也永不删除** md_cg 的永久锁文件。0.1.3 的「0 字节无主锁超过 5s 清除」经核实是误判（0 字节是 md_cg 锁的常态），相关表述已从 README/CHANGELOG 更正。
+- **灵枢索引直写不在其写协议内：节点可能回放复活（P0-2）**：md_cg 的持久化是「快照 `_index.json` + `_index_log/` 追加分片，装载时重放」。插件过去只重写快照，被删节点的记录留在分片里，下次装载会把节点加回来而正文已在回收站——典型「索引有条目、文件不存在」的幽灵节点。现在删除追加 `{"id, e:null}` 墓碑分片、恢复追加节点记录分片，`_t` 取「现在」与「最新分片时间 + 1ms」的较大值，保证重放时我们的记录排在最后：已删节点不会复活、已恢复节点不会被旧墓碑覆盖。
+- **设置页批量删除的确认框被设置弹层遮住（P0-3）**：设置弹层是 `createPortal(..., document.body)` 的 `position:fixed; z-index:1000`，插件对话框挂在 `.overlayLayer{z-index:20}` 内，遮罩的 `z-index:1000` 只是该 stacking context 内的值，跨不过父级的 20。确认框现在同样 portal 到 `document.body`、层级取 1100；toast 一并处理，恢复/清理的成功反馈在设置页里也可见了。
+- **live 会话跳过 foreign-writer 检查（P1-2）**：`assertNoForeignWriter` 开头就是 `if (session.live) return`——而 `quiesce` 只能停**本进程**的 Agent，另一端 Host 的 writer 恰好是本进程视角下的 live 会话，最需要保护的场景被豁免。现在所有模式都做 mtime 复检（grace 窗口通常在 `quiesce` 期间已满足，额外成本是一次 mtime 扫描）。
+- **软删除条目恢复失败把会话变成孤儿（P1-3）**：`catalog.restore` 的 undo 无条件 `detachSession`，而软删除的会话本来就在工作区里（归档只是隐藏），回滚把它从侧栏彻底摘掉。现在 undo 只反转本步**实际做过**的变更（是否 attach、是否 unarchive），软删除回滚时重新归档。
+- **未完成条目没有恢复入口（P1-4）**：`IncompleteEntries` 只渲染「清理」，但 `discard` 对仍持有 `session/` 的条目会拒绝，UI 提示「请改用恢复」却没有恢复按钮。现在按 `hasSessionLog` 渲染「恢复」按钮（调用已有的 `/trash/restore`），死条目有了出口。
+- **记忆导出失败留下永久卡死的条目（P1-5）**：`exportSession` 失败后已写出的 bundle 目录不删，manifest 又没记 memory，恢复与 discard 都拒绝。现在 catch 里还原文件后删除未登记的 bundle 目录。
+- **恢复不恢复原位置（P2-1）**：`insertSessionBefore` 要求会话已在 `sessionIds` 里，被 detach 的会话不在，于是必然走 catch 前插到列表顶部，快照的 `nextSessionId` 从未生效。现在先 `attachSession` 再 `insertSessionBefore(id, anchor)`。
+- **软删除 purge 的崩溃窗口（P2-2）**：日志已移进条目但 manifest 未写回 `sessionLog`，崩溃后一次恢复可能把仍躺在条目里的 `session/` 一并删掉。现在移动成功后立即更新 manifest；恢复/discard 都先检查磁盘上的 `session/`，不只信 manifest。
+- **多适配器恢复边恢复边删 bundle（P2-3）**：第一个适配器成功后 bundle 即被删，第二个失败时条目永远无法重试。现在全部适配器成功后才统一删除 bundle。
+- **`defaultMode` 是死配置（P2-4）**：对话框固定 `useState('soft')`，schema 却承诺「Initial mode selected in the confirmation dialog」。现在从 `/state` 的 ui flags 读取 Host 配置的默认模式。
+- **语言检测读错字段（P2-5）**：`dsh-client-locale` 快照结构是 `{active, locales, revision}`，插件找 `snapshot.locale ?? snapshot.id` 恒不中，回退 `navigator.language`——DSH 设置里切语言不生效。现在读 `snapshot.active`。
+- **`resolveDshHome` 不展开 `~`（P2-6）**：`DSH_HOME=~/dsh-data` 会在 cwd 下创建字面量 `~` 目录，回收站/审计落到错误位置。现在按官方口径展开 `~`/`~/`/`~\` 后 resolve。
+- **批量全选被单个不可删会话卡死（P2-7）**：`/preview` 只要一个 id 被策略拒绝就整批不签发 token，客户端禁用按钮且只显示第一条原因。现在 `/sessions` 每行带 `deletable` 裁决与原因，复选框禁用、hint 追加「无法删除: \<原因\>」，全选只选可删项。
+- **批量变更超时上限小于最坏耗时（P2-8）**：客户端 `30s + 5s × 数量` 上限 180s，50 个 live 会话可超时后 Host 继续执行、token 已消费。现在 `/preview` 返回 `planTimeoutMs`，客户端按计划规模设超时。
+- **`readJsonBody` 不处理请求中止（P2-9）**：客户端发 body 期间断开（超时/关页）时 `end` 永不触发，Promise 不 settle 并堵死 mutation 链。现在监听 `aborted`，以 `E_BAD_REQUEST` 拒绝。
+- **每次激活打印 3 条假告警（P3-1）**：`cordis.patch.yml` 把可空字段写成 `null`，`readString` 只接受 `undefined`/string。现在 `null` 作为「未设置」接受。
+- **深色主题 live 警告框不跟主题（P3-2）**：`--dsw-alias-text-warning`/`--dsw-alias-fill-warning` 在 0.2.1-rc.2 不存在（实际是 `--dsw-alias-state-warn-label`/`-tertiary`），回退成浅色块。已改用真实变量。
+- **桌面 `dsh-app:` 信任分支过宽（P3-5）**：桌面转发已剥离 Origin，该分支在真实链路里不触发；若保留则任何注册 `dsh-app:` scheme 的 Electron 应用都会被视同源。现收紧为 `protocol === 'dsh-app:' && hostname === 'app'`（与 DSH 自身 `origin === "dsh-app://app"` 口径一致），作为纵深防御保留。
+- **会话 id 正则不接受 `.`（P3-6）**：DSH `encodeSegment` 允许 `.`/`_`/`-`，fork/自定义 id 会被误拒。已放开。
+- **工作区路径大小写比较不一致（P3-7）**：`workspaceFor` 对**所有**路径 `toLowerCase()`，Linux 上 `/a/Foo` 与 `/a/foo` 误配；UNC 未按 Windows 语义处理。现在只对盘符路径与 UNC 根小写，POSIX 路径保持大小写敏感。
+- **审计 `source` 固定 `web-ui`（P3-8）**：桌面端发起的操作也记成 `web-ui`，平台取证时误导。现在按 `process.versions.electron` 记 `desktop-ui`/`web-ui`。
+- **批量软删除的硬删除文案分支不可达（P3-9）**：`dialog.hardWarning`（「请输入 DELETE」）在 `expectedPhrase === ''` 时不会渲染，hard 模式永远一键。已删除该文案。
+- **记忆适配器标签半本地化（P3-10）**：lingshu 的 label 是中英混合常量、`none` 是英文 reason，英文界面里会出现中文。现在 `adapterLabel`/`adapterReason` 按当前语言本地化，未知 key 原样透出。
+- **`/sessions` 每行误判 orphan**：`loadList` 只按 membership 解析 workspace，行上无 `workspace` 对象，`evaluateSessionPolicy({workspace: undefined})` 恒为 false，批量选择器全灰。现在增加 cwd 包含回退（与 `inspect` 的 `workspaceFor` 一致）并在行上附 workspace 对象。
+
+### Removed
+
+- `locale/{en,zh}.json`（P3-3）：运行时从无加载方，客户端只读内联 `STRINGS`，JSON 的键集与内联表不同（改了不生效）。两个死文件已删除，`package.json` 的 exports/files 同步清理；manifest 测试现在断言「不发布 locale 资源，Client 内嵌两套文案」。
+
+### Changed
+
+- `BatchSessionRow` 从 `SettingsSection` 的内联 JSX 抽为纯组件并导出，行禁用态、原因文案与 `selectableSessionIds` 过滤因此可被测试直接覆盖（P2-7 的验证基础）。
+
+### Tests
+
+- 104 checks (was 84); added full-authority origin comparison (含异端口/默认端口归一/`dsh-app://app` 信任与 `dsh-app://evil` 拒绝), connection `requestRejection`/waterfall 两道闸, cross-process mutation lock (`E_LOCK_BUSY`), batch-scaled plan timeout, per-row deletable verdict + reason, audit source (desktop/web), mid-body abort → 400, portal-into-body overlay (有空 payload/打开时两种形态), restore action for incomplete entries, batch row disabling with reasons, `defaultMode`/locale `active` from `/state`, adapter localization (per-locale fresh load), md_cg shard-log tombstones, multi-adapter restore atomicity, untracked bundle cleanup.
+
 ## [0.2.1] — 2026-10-18
 
 ### Fixed

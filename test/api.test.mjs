@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
+import { createFileLock } from '../lib/core/file-lock.js'
 import { createDeleteApi, ROUTE_PREFIX } from '../lib/host/api.js'
 import { createSessionLogOps } from '../lib/host/catalog.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
@@ -36,7 +38,15 @@ async function seedMemory(home, counts) {
   return root
 }
 
-async function makeFixture({ configOverrides = {}, sessionIds = [S1, S2, ORPHAN], memoryCounts = { [S1]: 2, [S2]: 1 }, liveSessionIds = [] } = {}) {
+async function makeFixture({
+  configOverrides = {},
+  sessionIds = [S1, S2, ORPHAN],
+  memoryCounts = { [S1]: 2, [S2]: 1 },
+  liveSessionIds = [],
+  ctxExtra = {},
+  mutationLock = null,
+  connection = null,
+} = {}) {
   const home = await makeTempHome()
   const workspaceRegistry = makeWorkspaceRegistry([
     { id: 'ws-1', path: 'D:\\Work', title: 'Work', sessionIds: [S1] },
@@ -74,25 +84,31 @@ async function makeFixture({ configOverrides = {}, sessionIds = [S1, S2, ORPHAN]
     },
     sessionController: { list: async () => ({ items }) },
     sessions: { get: (sessionId) => (liveSessionIds.includes(sessionId) ? { id: sessionId } : undefined) },
+    // The `connection` service is probed, not injected: a fixture without it
+    // keeps the route behind its own fence, exactly like a Host composition
+    // that does not publish the service.
+    ...(connection === null ? {} : { connection }),
   }
   const config = normalizeConfig(configOverrides).value
   const paths = resolveDataPaths(home.root)
   const logs = []
   const api = createDeleteApi({
-    ctx: { get: (name) => services[name] },
+    ctx: { get: (name) => services[name], ...ctxExtra },
     config,
     paths,
     logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
+    mutationLock,
   })
   return { home, api, config, paths, services, workspaceRegistry, seeded, memoryRoot, logs, items }
 }
 
-function call(api, path, { method = 'POST', body = null, headers = {} } = {}) {
+function call(api, path, { method = 'POST', body = null, headers = {}, abortBody = false } = {}) {
   return callRoute(api.handler, {
     method,
     path: `${ROUTE_PREFIX}${path}`,
     headers: { ...HEADERS, ...headers },
     body,
+    abortBody,
   })
 }
 
@@ -630,5 +646,242 @@ test('hard delete: an idle log is moved after the grace window', async () => {
     assert.equal(await pathExists(seeded.dir), false)
   } finally {
     await home.cleanup()
+  }
+})
+
+test('security: the full origin authority is compared, not just the hostname', async () => {
+  const fixture = await makeFixture()
+  try {
+    // A second loopback process serving http://127.0.0.1:9999 used to pass a
+    // hostname-only comparison and could drive deletions against this Host.
+    const foreignPort = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'http://127.0.0.1:9999' },
+    })
+    assert.equal(foreignPort.status, 403)
+    assert.equal(foreignPort.body.error.code, 'E_FORBIDDEN_ORIGIN')
+
+    // A missing port is normalized against the Origin's own scheme: the Host
+    // header carries no scheme, so `https://host` and `Host: host:443` agree.
+    const httpsDefault = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'https://127.0.0.1', host: '127.0.0.1:443' },
+    })
+    assert.equal(httpsDefault.status, 200)
+
+    const httpDefault = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1:80' },
+    })
+    assert.equal(httpDefault.status, 200)
+
+    // ...but an https Origin on the plaintext port is still a different origin.
+    const schemeMismatch = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'https://127.0.0.1', host: '127.0.0.1:14968' },
+    })
+    assert.equal(schemeMismatch.status, 403)
+
+    // The desktop shell origin is trusted as same-origin (the Host's own fence
+    // compares against exactly `dsh-app://app`); any other host under that
+    // scheme is not.
+    const appShell = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'dsh-app://app' },
+    })
+    assert.equal(appShell.status, 200)
+
+    const appShellImpostor = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'dsh-app://evil' },
+    })
+    assert.equal(appShellImpostor.status, 403)
+    assert.equal(appShellImpostor.body.error.code, 'E_FORBIDDEN_ORIGIN')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('connection: requestRejection short-circuits 401 and 403 before the route runs', async () => {
+  for (const [rejection, status, code] of [[401, 401, 'E_UNAUTHORIZED'], [403, 403, 'E_FORBIDDEN_ORIGIN']]) {
+    const fixture = await makeFixture({ connection: { requestRejection: () => rejection } })
+    try {
+      const result = await call(fixture.api, '/state', { method: 'GET' })
+      assert.equal(result.status, status)
+      assert.equal(result.body.error.code, code)
+      // The route itself never ran: no session work happened behind a refusal.
+      assert.equal(fixture.logs.length, 0)
+    } finally {
+      await fixture.home.cleanup()
+    }
+  }
+})
+
+test('connection: a waterfall veto (the desktop update lock) returns 503 without touching the transaction', async () => {
+  // The desktop app-update control listens on `connection/request` and refuses
+  // new requests while it drains in-flight ones. A listener that never calls
+  // `next()` is a veto; the route must not run and must not answer twice.
+  const fixture = await makeFixture({
+    ctxExtra: {
+      waterfall: (name, req, res, next) => {
+        assert.equal(name, 'connection/request')
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: { code: 'E_UNAVAILABLE', message: 'An update is installing.' } }))
+      },
+    },
+  })
+  try {
+    const result = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(result.status, 503)
+    assert.equal(result.body.error.code, 'E_UNAVAILABLE')
+    assert.equal(fixture.logs.length, 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('mutation lock: a busy cross-process lock is E_LOCK_BUSY, not a corrupted manifest', async () => {
+  const lockPath = join(process.cwd(), 'test', '.tmp', `mutation-busy-${randomBytes(6).toString('hex')}.lock`)
+  const holder = createFileLock({ lockPath, timeoutMs: 2_000, staleMs: 60_000, retryMs: 10 })
+  const fixture = await makeFixture({
+    // A short wait budget keeps the test fast; production waits 30s because a
+    // deletion transaction legitimately takes a while.
+    mutationLock: createFileLock({ lockPath, timeoutMs: 60, staleMs: 60_000, retryMs: 10 }),
+  })
+  const release = await holder.acquire()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const body = { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token }
+    const result = await call(fixture.api, '/delete', { body })
+    assert.equal(result.status, 409)
+    assert.equal(result.body.error.code, 'E_LOCK_BUSY')
+    // Refused BEFORE any mutation: the log is still in place, the recycle bin
+    // is still empty, and the session is not archived.
+    assert.equal(await pathExists(fixture.seeded.get(S1).dir), true)
+    assert.equal(await pathExists(join(fixture.paths.trashDir)).then((exists) => (exists ? 'dir' : 'none')), 'none')
+    assert.equal(fixture.workspaceRegistry.globalState.archived.has(S1), false)
+  } finally {
+    await release()
+    await fixture.home.cleanup()
+  }
+})
+
+test('preview: the plan timeout grows with the batch so a long delete is not aborted client-side', async () => {
+  const fixture = await makeFixture({ configOverrides: { maxBatchSessions: 50, maxDeletesPerMinute: 50 } })
+  try {
+    const single = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(typeof single.body.preview.limits.planTimeoutMs, 'number')
+    assert.ok(single.body.preview.limits.planTimeoutMs >= 15_000)
+    assert.ok(single.body.preview.limits.planTimeoutMs <= 900_000)
+
+    const many = await call(fixture.api, '/preview', { body: { sessionIds: [S1, S2], includeMemory: false, mode: 'soft' } })
+    assert.ok(many.body.preview.limits.planTimeoutMs > single.body.preview.limits.planTimeoutMs)
+
+    // A live session adds its drain window to the budget.
+    const live = await makeFixture({ liveSessionIds: [S1] })
+    try {
+      const livePreview = await call(live.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'hard' } })
+      assert.ok(livePreview.body.preview.limits.planTimeoutMs > single.body.preview.limits.planTimeoutMs)
+    } finally {
+      await live.home.cleanup()
+    }
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('sessions: each row carries a deletable verdict and the reason when it is not', async () => {
+  const fixture = await makeFixture({ configOverrides: { allowOrphanSessions: false } })
+  try {
+    const result = await call(fixture.api, '/sessions', { method: 'GET' })
+    assert.equal(result.status, 200)
+    const rows = result.body.sessions
+    const orphan = rows.find((row) => row.id === ORPHAN)
+    const owned = rows.find((row) => row.id === S1)
+    assert.equal(owned.deletable, true)
+    assert.deepEqual(owned.policy.ok, true)
+    assert.equal(orphan.deletable, false)
+    assert.equal(orphan.policy.ok, false)
+    assert.equal(orphan.policy.code, 'E_POLICY_ORPHAN')
+    assert.equal(typeof orphan.policy.message, 'string')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('audit: the source records which shell asked (web UI vs the desktop app)', async () => {
+  const readAuditSources = async (fixture) => {
+    const raw = await readFile(fixture.paths.auditFile, 'utf8')
+    return raw.trim().split('\n').filter((line) => line !== '').map((line) => JSON.parse(line).source)
+  }
+  // A valid plan whose session turns out to be a subagent's private
+  // conversation before the delete is confirmed is exactly the "denied" path:
+  // the token is fine, the policy is not, and the refusal is written to the
+  // audit trail with its provenance.
+  const deniedFixture = async () => {
+    const fixture = await makeFixture({ configOverrides: { maxDeletesPerMinute: 50 } })
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    // `inspect` re-reads the header on every call, so this lands after the
+    // token was issued — the same race a live Host can produce.
+    fixture.seeded.get(S1).header.origin = 'subagent'
+    const denied = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(denied.status, 403)
+    assert.equal(denied.body.error.code, 'E_POLICY_SUBAGENT')
+    return fixture
+  }
+  // Plain node: the web UI.
+  const web = await deniedFixture()
+  try {
+    assert.ok((await readAuditSources(web)).includes('web-ui'))
+  } finally {
+    await web.home.cleanup()
+  }
+  // The Electron shell: same code, different provenance.
+  const hadElectron = process.versions.electron
+  process.versions.electron = '99.0.0'
+  try {
+    const desktop = await deniedFixture()
+    try {
+      assert.ok((await readAuditSources(desktop)).includes('desktop-ui'))
+    } finally {
+      await desktop.home.cleanup()
+    }
+  } finally {
+    if (hadElectron === undefined) delete process.versions.electron
+    else process.versions.electron = hadElectron
+  }
+})
+
+test('body: a client that disconnects mid-body gets a 400, not a parked mutation chain', async () => {
+  const fixture = await makeFixture()
+  try {
+    // `aborted` fires and `end` never does. The body promise used to stay
+    // pending, which parked every later mutation behind it until a restart.
+    const aborted = await call(fixture.api, '/delete', { body: { sessionIds: [S1] }, abortBody: true })
+    assert.equal(aborted.status, 400)
+    assert.equal(aborted.body.error.code, 'E_BAD_REQUEST')
+    // The chain is not parked: a well-formed request still completes.
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(preview.status, 200)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('body: a client that disconnects mid-body gets a 400, not a parked mutation chain', async () => {
+  const fixture = await makeFixture()
+  try {
+    // `aborted` fires and `end` never does. The body promise used to stay
+    // pending, which parked every later mutation behind it until a restart.
+    const aborted = await call(fixture.api, '/delete', { body: { sessionIds: [S1] }, abortBody: true })
+    assert.equal(aborted.status, 400)
+    assert.equal(aborted.body.error.code, 'E_BAD_REQUEST')
+    // The chain is not parked: a well-formed request still completes.
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(preview.status, 200)
+  } finally {
+    await fixture.home.cleanup()
   }
 })

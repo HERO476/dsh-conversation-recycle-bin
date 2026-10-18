@@ -38,7 +38,7 @@ test('manifest: package identity, exports and Bundle/Client declarations', async
     }
     return false
   })
-  for (const file of ['lib/index.js', 'client.js', 'cordis.patch.yml', 'config.schema.json', 'icon.svg', 'locale/en.json', 'locale/zh.json']) {
+  for (const file of ['lib/index.js', 'client.js', 'cordis.patch.yml', 'config.schema.json', 'icon.svg']) {
     assert.ok(covered(file), `files does not cover ${file}`)
   }
 })
@@ -51,14 +51,14 @@ test('manifest: the Host row patch keeps a stable id equal to the package name r
   assert.match(patch, new RegExp(`name:\\s*${pkg.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })
 
-test('manifest: locale resources carry display metadata for both shipped locales', async () => {
-  for (const locale of ['en', 'zh']) {
-    const document = await readJson(`locale/${locale}.json`)
-    assert.equal(typeof document.meta.title, 'string')
-    assert.ok(document.meta.title.length > 0)
-    assert.equal(typeof document.meta.description, 'string')
-    assert.ok(document.meta.description.length > 0)
-  }
+test('manifest: no shipped locale resources — the Client carries both inline tables', async () => {
+  const pkg = await readJson('package.json')
+  assert.equal(pkg.exports['./locale/*.json'], undefined)
+  assert.ok(!pkg.files.some((entry) => entry.startsWith('locale/')), 'files still ships locale resources')
+  const client = await read('client.js')
+  assert.match(client, /const STRINGS = \{/)
+  assert.match(client, /^\s{6}en: \{$/m)
+  assert.match(client, /^\s{6}zh: \{$/m)
 })
 
 test('manifest: the icon parses as an SVG document', async () => {

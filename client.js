@@ -32,6 +32,31 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useMemo, useRef, useState } = React
     const h = React.createElement
 
+    /*
+     * `react-dom` is optional: without a portal the dialog still renders (in
+     * the overlay slot), it just cannot escape the overlay layer's stacking
+     * context. Probing instead of requiring keeps the module loadable on a
+     * host that ships React without ReactDOM.
+     */
+    let createPortal = null
+    try {
+      const ReactDOM = require('react-dom')
+      createPortal = ReactDOM?.createPortal ?? null
+    } catch {
+      createPortal = null
+    }
+
+    /** Render into `document.body` when possible (see DialogHost). */
+    function portalIntoBody(element) {
+      if (createPortal === null) return element
+      if (typeof document === 'undefined' || document.body === null || document.body === undefined) return element
+      try {
+        return createPortal(element, document.body)
+      } catch {
+        return element
+      }
+    }
+
     /* ------------------------------------------------------------------ *
      * Locale
      * ------------------------------------------------------------------ */
@@ -49,6 +74,7 @@ window.__ModuleLoader__.load({
         'action.purge': 'Delete permanently',
         'action.selectAll': 'Select all',
         'action.clearAll': 'Clear',
+        'batch.selectAllDeletable': 'Select every conversation that can be deleted',
         'section.label': 'Conversation Deletion',
         'section.title': 'Conversation Deletion',
         'section.subtitle': 'Recycle bin, batch deletion and the audit trail.',
@@ -70,7 +96,6 @@ window.__ModuleLoader__.load({
         'dialog.memoryKeep': 'The Host is configured to keep memory entries (deleteMode = keep).',
         'dialog.memoryDisabled': 'Associated-memory deletion is disabled in the Host configuration.',
         'dialog.records': '{events} log records · {size}',
-        'dialog.hardWarning': 'Type DELETE to confirm permanent deletion.',
         'dialog.batchWarning': 'Type the number {count} to confirm this batch.',
         'dialog.liveStopHint': 'This conversation is open in a live agent. Permanent deletion stops it first, then removes its log.',
         'dialog.phraseLabel': 'Confirmation',
@@ -93,6 +118,7 @@ window.__ModuleLoader__.load({
         'trash.purged': 'Permanently deleted.',
         'trash.incompleteTitle': 'Incomplete entries',
         'trash.incompleteHint': 'Entries that never committed. Discard them to free the space; an entry that still holds a conversation log must be restored or purged instead.',
+        'trash.restoreIncompleteHint': 'Put the conversation log back and re-attach it to its workspace.',
         'trash.discard': 'Discard',
         'trash.discarded': 'Entry removed.',
         'trash.confirmDiscard': 'Type DELETE to discard this incomplete entry.',
@@ -107,6 +133,7 @@ window.__ModuleLoader__.load({
         'batch.deleteSelected': 'Delete selected…',
         'batch.empty': 'No conversations.',
         'batch.overLimit': 'The selection exceeds the current limit of {limit}.',
+        'batch.notDeletable': 'cannot be deleted',
         'audit.title': 'Audit trail',
         'audit.empty': 'No deletion has been recorded yet.',
         'audit.denied': 'denied',
@@ -144,6 +171,12 @@ window.__ModuleLoader__.load({
         'error.E_FORBIDDEN_HOST': 'The Host only accepts deletion requests from loopback; set allowNonLoopback for remote access.',
         'error.E_FORBIDDEN_ORIGIN': 'The Host rejected this page as an untrusted origin.',
         'error.E_POLICY_FOREIGN_WRITER': 'Another DSH instance is still writing this conversation; close it there and retry.',
+        'error.E_LOCK_BUSY': 'Another DSH instance is using this recycle bin; retry in a moment.',
+        'error.E_UNAUTHORIZED': 'This request is not authenticated with the Host.',
+        'adapter.lingshu': 'Lingshu cognitive graph (md_cg)',
+        'adapter.generic-json': 'Generic JSON memory store',
+        'adapter.none': 'No memory store',
+        'adapter.reason.no-memory-store': 'No conversation-linked memory store was detected.',
         'common.bytes': '{value} {unit}',
       },
       zh: {
@@ -157,6 +190,7 @@ window.__ModuleLoader__.load({
         'action.purge': '彻底删除',
         'action.selectAll': '全选',
         'action.clearAll': '清除',
+        'batch.selectAllDeletable': '全选所有可删除的对话',
         'section.label': '对话删除',
         'section.title': '对话删除',
         'section.subtitle': '回收站、批量删除与审计留痕。',
@@ -178,7 +212,6 @@ window.__ModuleLoader__.load({
         'dialog.memoryKeep': '宿主配置为保留记忆（deleteMode = keep）。',
         'dialog.memoryDisabled': '宿主配置已禁用关联记忆删除。',
         'dialog.records': '{events} 条日志记录 · {size}',
-        'dialog.hardWarning': '彻底删除需输入 DELETE 确认。',
         'dialog.batchWarning': '批量删除需输入数字 {count} 确认。',
         'dialog.liveStopHint': '该对话仍在运行中；彻底删除会先停止它，再移除日志。',
         'dialog.phraseLabel': '确认',
@@ -201,6 +234,7 @@ window.__ModuleLoader__.load({
         'trash.purged': '已彻底删除。',
         'trash.incompleteTitle': '未完成条目',
         'trash.incompleteHint': '这些条目没有提交成功，可直接清理以释放空间；仍保存着会话日志的条目请先恢复或彻底删除。',
+        'trash.restoreIncompleteHint': '把会话日志放回原位，并重新挂回它所属的工作区。',
         'trash.discard': '清理',
         'trash.discarded': '条目已清理。',
         'trash.confirmDiscard': '输入 DELETE 清理该未完成条目。',
@@ -215,6 +249,7 @@ window.__ModuleLoader__.load({
         'batch.deleteSelected': '删除所选…',
         'batch.empty': '没有对话。',
         'batch.overLimit': '所选数量超过当前上限 {limit} 个。',
+        'batch.notDeletable': '无法删除',
         'audit.title': '审计留痕',
         'audit.empty': '尚无删除记录。',
         'audit.denied': '被拒绝',
@@ -252,6 +287,12 @@ window.__ModuleLoader__.load({
         'error.E_FORBIDDEN_HOST': '宿主只接受本机回环地址的删除请求；远程访问需设置 allowNonLoopback。',
         'error.E_FORBIDDEN_ORIGIN': '宿主拒绝了该页面的请求（来源校验未通过）。',
         'error.E_POLICY_FOREIGN_WRITER': '另一个 DSH 实例仍在写这个对话，已中止删除；请先关闭那边的对话再重试。',
+        'error.E_LOCK_BUSY': '另一个 DSH 实例正在使用回收站，请稍后重试。',
+        'error.E_UNAUTHORIZED': '该请求未通过宿主的鉴权。',
+        'adapter.lingshu': '灵枢认知图 (md_cg)',
+        'adapter.generic-json': '通用 JSON 记忆存储',
+        'adapter.none': '无记忆存储',
+        'adapter.reason.no-memory-store': '未检测到与对话关联的记忆存储。',
         'common.bytes': '{value} {unit}',
       },
     }
@@ -274,7 +315,11 @@ window.__ModuleLoader__.load({
       const service = peekLocaleService()
       try {
         const snapshot = service?.getSnapshot?.() ?? service?.getLocale?.()
-        const id = snapshot?.locale ?? snapshot?.id
+        // `dsh-client-locale`'s snapshot is `{ active, locales, revision }`:
+        // the ACTIVE locale id lives in `active`, and neither `locale` nor
+        // `id` exists. Reading the wrong fields silently fell back to the
+        // browser language, so the UI ignored the in-app language switch.
+        const id = snapshot?.active ?? snapshot?.locale ?? snapshot?.id
         if (typeof id === 'string' && id !== '') return id
       } catch {
         // fall through
@@ -310,6 +355,25 @@ window.__ModuleLoader__.load({
         const value = error?.details?.[name] ?? error?.[name]
         return value === undefined ? '—' : String(value)
       })
+    }
+
+    /**
+     * Localized adapter label. Host labels are deliberately neutral ids: the
+     * Chinese lingshu label and the English `none` reason used to appear
+     * untranslated in the other language's UI.
+     */
+    function adapterLabel(adapter) {
+      const key = `adapter.${adapter?.id ?? ''}`
+      const table = isZhLocale(currentLocaleId()) ? STRINGS.zh : STRINGS.en
+      return table[key] ?? adapter?.label ?? adapter?.id ?? '—'
+    }
+
+    /** Localize the stable reason keys; anything else is a raw Host message. */
+    function adapterReason(reason) {
+      if (typeof reason !== 'string' || reason === '') return ''
+      const key = `adapter.reason.${reason}`
+      const table = isZhLocale(currentLocaleId()) ? STRINGS.zh : STRINGS.en
+      return table[key] ?? reason
     }
 
     function useLocaleTick() {
@@ -471,10 +535,12 @@ window.__ModuleLoader__.load({
     /**
      * Host UI flags (`ui.showRowAction` / `ui.showHeaderAction`) used to be
      * dead configuration: the client registered both slots unconditionally.
+     * The same probe carries `defaultMode`, which the dialog used to ignore
+     * (it always started on soft).
      */
     const uiFlagsStore = {
       loaded: false,
-      flags: { showRowAction: true, showHeaderAction: true, enabled: true },
+      flags: { showRowAction: true, showHeaderAction: true, enabled: true, defaultMode: 'soft' },
       listeners: new Set(),
       set(flags) {
         this.flags = flags
@@ -502,10 +568,12 @@ window.__ModuleLoader__.load({
       try {
         const response = await api('/state')
         const ui = response?.state?.ui
+        const defaultMode = response?.state?.defaultMode
         uiFlagsStore.set({
           showRowAction: ui?.showRowAction !== false,
           showHeaderAction: ui?.showHeaderAction !== false,
           enabled: response?.state?.enabled !== false,
+          defaultMode: defaultMode === 'hard' ? 'hard' : 'soft',
         })
       } catch {
         // Defaults keep both entries visible; a failed probe is not fatal.
@@ -684,10 +752,13 @@ window.__ModuleLoader__.load({
 
     function DeleteDialog({ payload }) {
       useLocaleTick()
+      const flags = useUiFlags()
       const sessionIds = payload.sessionIds
       const count = sessionIds.length
       const fallbackTitle = payload.displayTitle ?? ''
-      const [mode, setMode] = useState('soft')
+      // `config.defaultMode` was dead configuration: the dialog always started
+      // on soft, so the Host's documented "initial mode" never applied.
+      const [mode, setMode] = useState(flags.defaultMode === 'hard' ? 'hard' : 'soft')
       const [includeMemory, setIncludeMemory] = useState(false)
       const [preview, setPreview] = useState(null)
       const [loading, setLoading] = useState(true)
@@ -755,9 +826,16 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(null)
         try {
+          // The Host's own worst-case estimate for THIS plan (live drains,
+          // memory locks, per-item moves) replaces the client's flat guess:
+          // aborting while the Host keeps deleting left a consumed token and a
+          // half-changed list behind.
+          const planTimeout = Number.isFinite(preview?.limits?.planTimeoutMs)
+            ? Math.max(1_000, preview.limits.planTimeoutMs)
+            : mutationTimeoutMs(sessionIds.length)
           const result = await api('/delete', {
             method: 'POST',
-            timeoutMs: mutationTimeoutMs(sessionIds.length),
+            timeoutMs: planTimeout,
             body: {
               sessionIds,
               includeMemory,
@@ -880,9 +958,10 @@ window.__ModuleLoader__.load({
           expectedPhrase !== ''
             ? h('label', { className: 'dc-phrase' },
               h('span', { className: 'dc-phrase-label' },
-                mode === 'hard' && count > 1
-                  ? t('dialog.batchWarning', { count })
-                  : mode === 'hard' ? t('dialog.hardWarning') : t('dialog.batchWarning', { count })),
+                // A phrase exists only for a multi-item soft batch (the Host's
+                // `expectedPhrase` returns '' for hard mode), so the label is
+                // always the batch instruction.
+                t('dialog.batchWarning', { count })),
               h('input', {
                 type: 'text',
                 value: phrase,
@@ -909,22 +988,36 @@ window.__ModuleLoader__.load({
     function reasonForUnavailable(memory) {
       const adapters = Array.isArray(memory?.adapters) ? memory.adapters : []
       const first = adapters.find((adapter) => adapter.available === false && typeof adapter.reason === 'string' && adapter.reason !== '')
-      if (first !== undefined) return first.reason
+      if (first !== undefined) return adapterReason(first.reason)
       const stores = Array.isArray(memory?.stores) ? memory.stores : []
       const store = stores.find((item) => item.available === false && typeof item.reason === 'string')
-      return store?.reason ?? 'not detected'
+      return store === undefined ? 'not detected' : adapterReason(store.reason)
     }
 
     /* ------------------------------------------------------------------ *
      * Dialog host / overlay entry
      * ------------------------------------------------------------------ */
 
+    /**
+     * Dialog host / overlay entry.
+     *
+     * The dialog is portaled to `document.body` on purpose: the `shell.overlay`
+     * slot renders inside the layout's overlay layer
+     * (`.overlayLayer{position:absolute;z-index:20}`), which is its own
+     * stacking context. A `z-index:1000` backdrop inside it cannot cover the
+     * settings modal (also `z-index:1000`, but on `body`), so the batch-delete
+     * confirmation opened from Settings was invisible and its first click
+     * closed the settings modal instead. Portaling to the body puts the dialog
+     * in the same layer as every other modal; the toast follows for the same
+     * reason.
+     */
     function DialogHost() {
       const payload = useDialogState()
       const flash = useFlashMessage()
-      return h(React.Fragment, null,
+      const content = h(React.Fragment, null,
         payload === null ? null : h(DeleteDialog, { payload, key: payload.key ?? payload.sessionIds.join(',') }),
         flash === null ? null : h('div', { className: 'dc-toast', role: 'status' }, flash))
+      return portalIntoBody(content)
     }
 
     /* ------------------------------------------------------------------ *
@@ -984,8 +1077,12 @@ window.__ModuleLoader__.load({
     /**
      * Entries that never committed. Kept as its own component so the element
      * tree can be built (and smoke-tested) without a live Settings page.
+     *
+     * A restorable entry (one whose manifest still points at a moved session
+     * log) gets a Restore button: `performDiscard` refuses exactly those
+     * entries, so without this the only way out was a manual API call.
      */
-    function IncompleteEntries({ entries, discardTarget, discardPhrase, onPhrase, onStart, onCancel, onDiscard }) {
+    function IncompleteEntries({ entries, discardTarget, discardPhrase, onPhrase, onStart, onCancel, onDiscard, onRestore, restoreBusyId }) {
       return h('div', { className: 'dc-panel dc-incomplete' },
         h('div', { className: 'dc-state-title' }, `${t('trash.incompleteTitle')} (${entries.length})`),
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
@@ -995,6 +1092,13 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dc-hint' },
               `${t(`trash.status.${entry.status}`)} · ${formatTime(entry.updatedAt ?? entry.deletedAt)} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
           h('div', { className: 'dc-row-actions' },
+            entry.hasSessionLog === true && typeof onRestore === 'function'
+              ? h(Button, {
+                onClick: () => onRestore(entry.trashId),
+                disabled: restoreBusyId === entry.trashId,
+                title: t('trash.restoreIncompleteHint'),
+              }, t('action.restore'))
+              : null,
             discardTarget === entry.trashId
               ? h('span', { className: 'dc-inline-confirm' },
                 h('input', {
@@ -1016,6 +1120,33 @@ window.__ModuleLoader__.load({
               }, t('trash.discard'))))))
     }
 
+    /**
+     * One batch-picker row. A conversation the Host would refuse (subagent,
+     * orphan, outside the allowed roots, protected) is rendered disabled with
+     * the reason, instead of selectable and then failing the whole batch.
+     */
+    function BatchSessionRow({ session, checked, onToggle }) {
+      const notDeletable = session.deletable === false
+      return h('label', { key: session.id, className: `dc-row dc-row-select${notDeletable ? ' dc-disabled' : ''}` },
+        h('input', {
+          type: 'checkbox',
+          checked,
+          disabled: notDeletable,
+          onChange: () => onToggle(session.id),
+        }),
+        h('div', { className: 'dc-row-main' },
+          h('div', { className: 'dc-row-title' }, session.title || session.id),
+          h('div', { className: 'dc-hint' },
+            `${session.cwd ?? '—'}${session.archived ? ' · archived' : ''}${session.live || session.running ? ' · live' : ''}`
+            + (notDeletable ? ` · ${t('batch.notDeletable')}: ${errorText(session.policy)}` : ''))),
+        h('div', { className: 'dc-row-time' }, formatTime(session.updatedAt)))
+    }
+
+    /** Ids "select all" may mark: every row the Host has not vetoed. */
+    function selectableSessionIds(sessions) {
+      return sessions.filter((session) => session.deletable !== false).map((session) => session.id)
+    }
+
     function SettingsSection() {
       useLocaleTick()
       const mutationVersion = useMutationVersion()
@@ -1032,6 +1163,7 @@ window.__ModuleLoader__.load({
       const [purgePhrase, setPurgePhrase] = useState('')
       const [discardTarget, setDiscardTarget] = useState(null)
       const [discardPhrase, setDiscardPhrase] = useState('')
+      const [restoreBusyId, setRestoreBusyId] = useState(null)
 
       const refresh = useCallback(async () => {
         setLoading(true)
@@ -1084,6 +1216,33 @@ window.__ModuleLoader__.load({
           })
         } catch (caught) {
           setError(caught)
+        }
+      }
+
+      /**
+       * Restore an entry that never committed (pending / failed / interrupted).
+       * The same endpoint as the recycle-bin restore: `performRestore` accepts
+       * those statuses, and this is the action `performDiscard` tells the user
+       * to take when the entry still holds a session log.
+       */
+      async function restoreIncomplete(trashId) {
+        setError(null)
+        setRestoreBusyId(trashId)
+        try {
+          await api('/trash/restore', { method: 'POST', body: { trashId } })
+          flashStore.show(t('trash.restored'))
+          await refresh()
+          await refreshAfterMutation({
+            sessionIds: incomplete.find((item) => item.trashId === trashId)?.sessionId
+              ? [incomplete.find((item) => item.trashId === trashId).sessionId]
+              : [],
+            closeCurrent: false,
+            notify: false,
+          })
+        } catch (caught) {
+          setError(caught)
+        } finally {
+          setRestoreBusyId(null)
         }
       }
 
@@ -1153,8 +1312,8 @@ window.__ModuleLoader__.load({
               className: 'dc-state-row',
             },
             h('span', { className: adapter.available ? 'dc-ok' : 'dc-off' }, adapter.available ? '●' : '○'),
-            h('span', null, ` ${adapter.label ?? adapter.id} `),
-            h('span', { className: 'dc-hint' }, adapter.available ? t('state.available') : `${t('state.unavailable')} — ${adapter.reason ?? ''}`)))),
+            h('span', null, ` ${adapterLabel(adapter)} `),
+            h('span', { className: 'dc-hint' }, adapter.available ? t('state.available') : `${t('state.unavailable')} — ${adapterReason(adapter.reason)}`)))),
           h('div', { className: 'dc-state-block' },
             h('div', { className: 'dc-state-title' }, t('state.limits')),
             h('div', { className: 'dc-hint' },
@@ -1202,13 +1361,19 @@ window.__ModuleLoader__.load({
           onStart: (trashId) => { setDiscardTarget(trashId); setDiscardPhrase('') },
           onCancel: () => { setDiscardTarget(null); setDiscardPhrase('') },
           onDiscard: (trashId) => { void discard(trashId, discardPhrase.trim()) },
+          onRestore: (trashId) => { void restoreIncomplete(trashId) },
+          restoreBusyId,
         }) : null,
 
         tab === 'batch' && !loading ? h('div', { className: 'dc-panel' },
           h('div', { className: 'dc-batch-bar' },
             h('span', { className: 'dc-hint' }, t('batch.selected', { count: selectedIds.length })),
+            // "Select all" only marks deletable rows: a batch containing one
+            // subagent/orphan/out-of-root conversation is refused as a whole,
+            // so selecting it guaranteed a dead button with no hint why.
             h(Button, {
-              onClick: () => setSelected(new Set(sessions.map((session) => session.id))),
+              onClick: () => setSelected(new Set(selectableSessionIds(sessions))),
+              title: t('batch.selectAllDeletable'),
             }, t('action.selectAll')),
             h(Button, { onClick: () => setSelected(new Set()) }, t('action.clearAll')),
             h(Button, {
@@ -1219,13 +1384,12 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dc-hint' }, t('batch.hint')),
           overLimit ? h('p', { className: 'dc-error-text' }, t('batch.overLimit', { limit: effectiveBatch })) : null,
           sessions.length === 0 ? h('div', { className: 'dc-empty' }, t('batch.empty')) : null,
-          ...sessions.map((session) => h('label', { key: session.id, className: 'dc-row dc-row-select' },
-            h('input', { type: 'checkbox', checked: selected.has(session.id), onChange: () => toggle(session.id) }),
-            h('div', { className: 'dc-row-main' },
-              h('div', { className: 'dc-row-title' }, session.title || session.id),
-              h('div', { className: 'dc-hint' },
-                `${session.cwd ?? '—'}${session.archived ? ' · archived' : ''}${session.live || session.running ? ' · live' : ''}`)),
-            h('div', { className: 'dc-row-time' }, formatTime(session.updatedAt))))) : null,
+          ...sessions.map((session) => h(BatchSessionRow, {
+            key: session.id,
+            session,
+            checked: selected.has(session.id),
+            onToggle: toggle,
+          }))) : null,
 
         tab === 'audit' && !loading ? h('div', { className: 'dc-panel' },
           audit.length === 0 ? h('div', { className: 'dc-empty' }, t('audit.empty')) : null,
@@ -1246,7 +1410,9 @@ window.__ModuleLoader__.load({
      * ------------------------------------------------------------------ */
 
     const CSS = `
-.dc-backdrop{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);padding:16px}
+/* 1100 sits above the settings modal (z-index 1000 on body) now that the
+   dialog is portaled into the same layer. */
+.dc-backdrop{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);padding:16px}
 .dc-dialog{width:min(560px,94vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1f2329);border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.28);padding:20px 20px 16px;font:inherit}
 .dc-dialog-title{margin:0 0 8px;font-size:16px;font-weight:600;line-height:1.4}
 .dc-dialog-body{margin:0 0 12px;font-size:13px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.6}
@@ -1255,7 +1421,7 @@ window.__ModuleLoader__.load({
 .dc-modes{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .dc-mode{display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;cursor:pointer;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
 .dc-mode-preferred{border-color:var(--dsw-alias-brand-primary,#4d6bfe)}
-.dc-live-warning{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;color:var(--dsw-alias-text-warning,#b26a00);background:var(--dsw-alias-fill-warning,#fff7e6)}
+.dc-live-warning{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-warn-label,#b26a00);background:var(--dsw-alias-state-warn-tertiary,#fff7e6)}
 .dc-mode input{margin-top:3px}
 .dc-mode-title{display:block;font-size:13px;font-weight:600}
 .dc-hint{display:block;font-size:12px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.5;margin-top:2px}
@@ -1308,6 +1474,7 @@ window.__ModuleLoader__.load({
 .dc-empty{padding:18px;text-align:center;font-size:12px;color:var(--dsw-alias-label-secondary,#646a73)}
 .dc-row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
 .dc-row-select{cursor:pointer}
+.dc-row-select.dc-disabled{opacity:.55;cursor:not-allowed}
 .dc-row-main{min-width:0;flex:1}
 .dc-row-title{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dc-row-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
@@ -1398,7 +1565,11 @@ window.__ModuleLoader__.load({
     exports.__api = api
     // Direct component handles keep the hook-level behavior testable without a
     // DOM renderer (the registered wrapper alone only builds an element).
-    exports.__components = { DeleteMenuRow, HeaderDeleteAction, DeleteDialog, SettingsSection, IncompleteEntries }
+    exports.__components = { DeleteMenuRow, HeaderDeleteAction, DeleteDialog, SettingsSection, IncompleteEntries, BatchSessionRow }
+    exports.__selectableSessionIds = selectableSessionIds
+    exports.__adapterLabel = adapterLabel
+    exports.__adapterReason = adapterReason
+    exports.__loadUiFlags = loadUiFlags
     return module.exports
   },
 })
