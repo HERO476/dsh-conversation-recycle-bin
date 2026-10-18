@@ -3,6 +3,13 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.2] — 2026-10-18
+
+### Fixed
+
+- **`feedback.visitorAsFrom` 在 HTTP 通道静默失效**：HTTP 通道此前固定发送配置的 `from`（未配置则省略字段），`visitorAsFrom: true` 只在 SMTP 通道生效。现在 HTTP 通道同样在显式开启且访客填写了邮箱时把访客邮箱作为 `From`；默认配置下发送的请求体逐字节不变。
+- **邮件正文把访客邮箱标注为发件人**：正文上下文里的 `from / 发件人` 行改为如实的 `visitor / 访客邮箱`。此前无论 `visitorAsFrom` 是否开启，该行都把访客邮箱标成发件人，与真实 `From`（发信账号或访客邮箱）不符；`reply-to` 行保留不变。
+
 ## [0.3.1] — 2026-10-18
 
 ### Added
