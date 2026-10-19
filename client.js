@@ -127,6 +127,7 @@ window.__ModuleLoader__.load({
         'trash.status.restoring': 'restoring',
         'trash.status.purging': 'purging',
         'trash.status.restored': 'restored',
+        'trash.status.unreadable': 'unreadable manifest',
         'batch.title': 'Batch deletion',
         'batch.hint': 'Each conversation is its own transaction; a failure rolls only that conversation back.',
         'batch.selected': '{count} selected',
@@ -280,6 +281,7 @@ window.__ModuleLoader__.load({
         'trash.status.restoring': '恢复中断',
         'trash.status.purging': '清理中断',
         'trash.status.restored': '已恢复',
+        'trash.status.unreadable': '清单不可读',
         'batch.title': '批量删除',
         'batch.hint': '每个对话独立事务；失败时仅回滚该对话。',
         'batch.selected': '已选 {count} 个',
@@ -1447,9 +1449,10 @@ window.__ModuleLoader__.load({
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
         ...entries.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
           h('div', { className: 'dc-row-main' },
-            h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId),
-            h('div', { className: 'dc-hint' },
-              `${t(`trash.status.${entry.status}`)} · ${formatTime(entry.updatedAt ?? entry.deletedAt)} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
+            h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId || entry.trashId),
+            h('div', { className: 'dc-hint' }, entry.status === 'unreadable' && entry.error?.message
+              ? `${t('trash.status.unreadable')} · ${entry.error.message}`
+              : `${t(`trash.status.${entry.status}`)} · ${formatTime(entry.updatedAt ?? entry.deletedAt)} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
           h('div', { className: 'dc-row-actions' },
             entry.hasSessionLog === true && typeof onRestore === 'function'
               ? h(Button, {
@@ -1819,7 +1822,6 @@ window.__ModuleLoader__.load({
 .dc-meta{font-size:12px;color:var(--dsw-alias-label-secondary,#646a73);margin-bottom:10px}
 .dc-modes{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .dc-mode{display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;cursor:pointer;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
-.dc-mode-preferred{border-color:var(--dsw-alias-brand-primary,#4d6bfe)}
 .dc-live-warning{margin-top:10px;padding:8px 10px;border-radius:8px;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-warn-label,#b26a00);background:var(--dsw-alias-state-warn-tertiary,#fff7e6)}
 .dc-mode input{margin-top:3px}
 .dc-mode-title{display:block;font-size:13px;font-weight:600}

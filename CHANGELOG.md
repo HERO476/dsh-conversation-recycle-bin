@@ -3,6 +3,36 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.3] — 2026-10-19
+
+本次修复对应 `AUDIT-2026-10-19-review.md` 的 S1–S3、P1–P5、R1–R4 与 M 项；每条均带回归测试。
+
+### Security
+
+- **S1：`Host` 头不带端口时同源端口比较被恒真绕过**：`requestPort === ''` 时旧表达式退化为 `originPort === originPort`，任意端口的 Origin 都通过。现在缺失端口按 Origin 自身 scheme 的默认端口归一（http→80、https→443），`Host: 127.0.0.1` + `Origin: http://127.0.0.1:9999` 被拒为 `403 E_FORBIDDEN_ORIGIN`，而 `http://127.0.0.1`（无端口）仍放行。
+
+### Fixed
+
+- **S2：未知 GET 路由误报 405**：路径不存在时 GET/POST 统一返回 `404 E_NOT_FOUND`，405 只保留给「路径存在但方法错误」。
+- **S3：损坏/缺失 manifest 的回收站目录永久隐身**：新增 `trash.scanUnreadable()`（missing / corrupt / unreadable 三类），`/trash` 把它们列为 `status: 'unreadable'` 的 incomplete 项；`discard` 对目录存在但清单不可读的条目走 `performDiscard` 的磁盘检查——空目录可强制清理，仍持有 `session/` 日志或记忆文件则拒绝（`409 E_TRASH_CONFLICT`），不再只能手动删盘。
+- **P1：live drain 轮询每轮全量重建会话列表**：`inspectRunning` 先走新增的 `gateway.isRunning(sessionId)` 内存存活表探针（`running/active/busy` 布尔），探针答不出才回退全量 `inspect()`，批量删除多个 live 会话时不再线性放大 `controller.list()` 与工作区扫描。
+- **P2：`/trash` 每次全量读盘解析 manifest**：加 1.5s TTL 缓存，delete/restore/purge/discard 成功后主动失效。
+- **P3：`/audit` 全量读 5MB 再解析**：`tail()` 只读尾部 256KB 块、丢弃首条残行，malformed 只统计窗口内。
+- **P4：跨进程锁等待 30s 短于批量最坏耗时**：`/delete` 锁预算按 `min(900s, 15s + 16s×批量数 + 每 live 会话的 drain 窗口)` 估算，大批量不再被第二个 Host 误判 `E_LOCK_BUSY`。
+- **P5：全部 blocked 时仍做全量记忆计数**：`blocked.length > 0` 时跳过 `countForSessions`，返回 `{total:0, skipped:true}` 形状。
+- **R1：请求体超限后继续读完整个 body**：超限立即 `finish(413)`，慢速超大请求不再占着连接。
+- **R2：反馈投递失败也扣每小时额度**：`takeSlot` 返回 `release()`，传输失败 catch 里先退还槽位再抛 `E_FEEDBACK_TRANSPORT`；成功投递才计数，SMTP/HTTP 临时故障不会把用户锁一小时。
+- **R3：批量列表按 soft 固定裁决，与 `defaultMode` 脱节**：`/sessions` 每行裁决改用 `config.defaultMode`；`stopLiveSessions:false` + hard 默认时，不可删的 live 行直接标 `deletable:false`。
+- **R4：失败的删除项也占每分钟额度**：`limiter.take(1)` 改为带 `release()` 的预留，单条失败在 catch 里退还槽位，只有真正成功的删除计入窗口；首个 item 预算不足直接抛 429 的既有契约不变。
+
+### Changed / Maintenance
+
+- **M2：会话 ID 正则去重**：抽出 `lib/core/ids.js` 的 `SESSION_ID_PATTERN`，`api.js` / `gateway.js` 共享，删除两处本地副本。
+- **M4：`/state` 不再外泄记忆适配器绝对路径**：只输出 `{id,label,available,reason}`，`storePath` 不离开 Host。
+- **M1：删除无引用的死 CSS `.dc-mode-preferred`**。
+- **M3：`npm run check` 改为 `scripts/check-syntax.mjs` 遍历 `lib/**/*.js` + `client.js` 逐个 `node --check`**（原链式清单只覆盖 3 个文件，新增/改名模块不会再漏检）。
+- 回归测试：`feedback` 17 → 18、`core` 13 → 14、`api` 34 → 38；新增覆盖 S1 无端口 Host、S2 未知路由 404、S3 损坏清单列出/清理/冲突、R2 失败退额度、R3 默认模式裁决、R4 失败退额度。
+
 ## [0.3.2] — 2026-10-18
 
 ### Fixed

@@ -289,6 +289,18 @@ test('http transport: a refused response becomes E_FEEDBACK_TRANSPORT with the s
   )
 })
 
+test('rate limit: a failed delivery refunds its slot instead of spending the cap', async () => {
+  const service = makeService({
+    configOverrides: { feedback: { rateLimitPerHour: 1 } },
+    fetchImpl: recordingFetch(() => fakeResponse(500)).fetchImpl,
+  })
+  const payload = { title: '一个可以复现的问题', body: '这就是足够长的正文内容。' }
+  await assert.rejects(() => service.submit(payload), (error) => error.code === 'E_FEEDBACK_TRANSPORT')
+  // The failure released the slot: a second attempt reaches the transport
+  // again instead of being refused by the hourly cap.
+  await assert.rejects(() => service.submit(payload), (error) => error.code === 'E_FEEDBACK_TRANSPORT')
+})
+
 test('rate limit: the hourly cap refuses the next message with a retry hint', async () => {
   let clock = 1_000
   const service = makeService({ configOverrides: { feedback: { rateLimitPerHour: 2 } }, now: () => clock })

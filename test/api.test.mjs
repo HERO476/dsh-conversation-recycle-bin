@@ -682,6 +682,21 @@ test('security: the full origin authority is compared, not just the hostname', a
     })
     assert.equal(schemeMismatch.status, 403)
 
+    // A Host header WITHOUT a port defaults to the Origin's scheme port; it
+    // must not match an arbitrary foreign port (that used to pass any port).
+    const noPortForeign = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'http://127.0.0.1:9999', host: '127.0.0.1' },
+    })
+    assert.equal(noPortForeign.status, 403)
+    assert.equal(noPortForeign.body.error.code, 'E_FORBIDDEN_ORIGIN')
+
+    const noPortDefault = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: 'http://127.0.0.1', host: '127.0.0.1' },
+    })
+    assert.equal(noPortDefault.status, 200)
+
     // The desktop shell origin is trusted as same-origin (the Host's own fence
     // compares against exactly `dsh-app://app`); any other host under that
     // scheme is not.
@@ -881,6 +896,93 @@ test('body: a client that disconnects mid-body gets a 400, not a parked mutation
     // The chain is not parked: a well-formed request still completes.
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
     assert.equal(preview.status, 200)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('routing: an unknown path answers 404 for both GET and POST, not a misleading 405', async () => {
+  const fixture = await makeFixture()
+  try {
+    const get = await call(fixture.api, '/does-not-exist', { method: 'GET', headers: {} })
+    assert.equal(get.status, 404)
+    assert.equal(get.body.error.code, 'E_NOT_FOUND')
+    const post = await call(fixture.api, '/does-not-exist', { body: {} })
+    assert.equal(post.status, 404)
+    assert.equal(post.body.error.code, 'E_NOT_FOUND')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('trash: a corrupt manifest is surfaced as unreadable and discardable once empty', async () => {
+  const fixture = await makeFixture()
+  try {
+    const corruptId = 'abc-123456'
+    const corruptDir = join(fixture.paths.trashDir, corruptId)
+    await mkdir(join(corruptDir, 'memory'), { recursive: true })
+    await writeFile(join(corruptDir, 'manifest.json'), '{ broken json', 'utf8')
+
+    const listed = await call(fixture.api, '/trash', { method: 'GET' })
+    const row = listed.body.incomplete.find((item) => item.trashId === corruptId)
+    assert.ok(row !== undefined)
+    assert.equal(row.status, 'unreadable')
+
+    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId: corruptId, confirmPhrase: 'DELETE' } })
+    assert.equal(discarded.status, 200)
+    assert.equal(await pathExists(corruptDir), false)
+
+    // A folder still holding a moved log is refused even without a readable manifest.
+    const heldId = 'def-654321'
+    const heldDir = join(fixture.paths.trashDir, heldId)
+    await mkdir(join(heldDir, 'session'), { recursive: true })
+    await writeFile(join(heldDir, 'session', 'session.jsonl.zstd'), Buffer.alloc(8, 7), 'utf8')
+    await writeFile(join(heldDir, 'manifest.json'), 'junk', 'utf8')
+    const refused = await call(fixture.api, '/trash/discard', { body: { trashId: heldId, confirmPhrase: 'DELETE' } })
+    assert.equal(refused.status, 409)
+    assert.equal(refused.body.error.code, 'E_TRASH_CONFLICT')
+    assert.equal(await pathExists(heldDir), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('sessions: the list verdict follows the configured default mode (hard refuses live when stopping is off)', async () => {
+  const fixture = await makeFixture({
+    liveSessionIds: [S1],
+    configOverrides: { stopLiveSessions: false, defaultMode: 'hard' },
+  })
+  try {
+    const result = await call(fixture.api, '/sessions', { method: 'GET' })
+    const row = result.body.sessions.find((item) => item.id === S1)
+    assert.equal(row.deletable, false)
+    assert.equal(row.policy.code, 'E_POLICY_LIVE')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('rate limit: a failed item refunds its slot; only successes count against the cap', async () => {
+  const fixture = await makeFixture({
+    configOverrides: { maxDeletesPerMinute: 2 },
+    sessionIds: [S1, S2],
+  })
+  try {
+    // S1 fails at its catalog detach step; S2 succeeds. The failed S1 must
+    // refund its slot, so the window holds one used deletion, not two.
+    fixture.workspaceRegistry.get('ws-1').detachSession = async () => { throw new Error('writer busy') }
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1, S2], includeMemory: false, mode: 'hard' } })
+    const result = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1, S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(result.status, 200)
+    assert.equal(result.body.partial, true)
+    assert.equal(result.body.results[0].sessionId, S2)
+    assert.equal(result.body.failures[0].sessionId, S1)
+    assert.notEqual(result.body.failures[0].error.code, 'E_RATE_LIMITED')
+
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.body.state.limits.rate.used, 1)
   } finally {
     await fixture.home.cleanup()
   }

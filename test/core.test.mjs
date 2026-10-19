@@ -101,14 +101,31 @@ test('policy: orphan deletion can be opted into and reports a warning', () => {
 test('rate limiter: sliding window, refill and status', () => {
   let clock = 1_000
   const limiter = createSlidingWindowLimiter({ limit: 2, windowMs: 60_000, now: () => clock })
-  assert.deepEqual(limiter.take(1), { ok: true, remaining: 1 })
-  assert.deepEqual(limiter.take(1), { ok: true, remaining: 0 })
+  const first = limiter.take(1)
+  assert.equal(first.ok, true)
+  assert.equal(first.remaining, 1)
+  const second = limiter.take(1)
+  assert.equal(second.ok, true)
+  assert.equal(second.remaining, 0)
   const denied = limiter.take(1)
   assert.equal(denied.ok, false)
   assert.equal(denied.limit, 2)
   assert.ok(denied.retryAfterMs > 0)
   clock += 60_001
   assert.equal(limiter.take(1).ok, true)
+  assert.equal(limiter.status().used, 1)
+})
+
+test('rate limiter: a failed reservation releases its slot instead of spending the cap', () => {
+  let clock = 1_000
+  const limiter = createSlidingWindowLimiter({ limit: 1, windowMs: 60_000, now: () => clock })
+  const failed = limiter.take(1)
+  assert.equal(failed.ok, true)
+  failed.release()
+  assert.equal(limiter.status().used, 0)
+  // The refunded slot is available again for a genuine deletion.
+  const retry = limiter.take(1)
+  assert.equal(retry.ok, true)
   assert.equal(limiter.status().used, 1)
 })
 
