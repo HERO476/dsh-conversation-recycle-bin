@@ -256,6 +256,10 @@ originPort !== '' && originPort === (requestPort === '' ? originPort : requestPo
 | 7 | 测试环境 ACL | 见 W-07 | 诊断报告 |
 | 8 | npm 发布 | **已执行**（用户确认后）：`+ dsh-conversation-recycle-bin@0.3.3`，35 文件、打包 140.1 kB、解包 437,450 B、`shasum c215fc95aef8299c8355bada637c404e4eab3dfb`、`integrity sha512-q1igimuIeQYYP…jiyAKnGP1DrHw==`；registry 复验 `dist-tags.latest=0.3.3`、`gitHead=a0b5317`（CDN 有约 4 分钟传播延迟） | `npm publish` 输出 / `npm view` / `https://registry.npmjs.org/dsh-conversation-recycle-bin/0.3.3` |
 | 9 | GitHub 推送与打标 | `55883b9..a0b5317 HEAD -> main`；注释标签 `v0.3.3` → `a0b5317`（远端复核：`refs/tags/v0.3.3`=`ff69ac3…`、`refs/tags/v0.3.3^{}`=`a0b5317`、`refs/heads/main`=`a0b5317`） | `git push` 输出 / `git ls-remote --tags origin` |
+| 10 | 发布产物复核（「npm 上的包 == 已审计代码」） | 直连下载 `https://registry.npmjs.org/dsh-conversation-recycle-bin/-/dsh-conversation-recycle-bin-0.3.3.tgz`：**sha1 = `c215fc95aef8299c8355bada637c404e4eab3dfb`（与 `npm publish` 输出一致）**、140,063 B、解包 **35 文件**；`lib/host/api.js`、`lib/version.js`、`client.js`、`lib/core/ids.js` 的 SHA-256 与工作区**逐一 MATCH**；包内 `PLUGIN_VERSION = '0.3.3'` | `Invoke-WebRequest` + `tar -xzf` + `Get-FileHash` |
+| 11 | 本次报告更新入库 | `a44d933 docs(audit): 更正 Electron 版本与桌面端重启/崩溃事实，记录 0.3.3 发布与 v0.3.3 标签`（已推送，`git status -sb` = `## main...origin/main`） | `git log --oneline` |
+
+> 复核陷阱记录：`npm pack dsh-conversation-recycle-bin@0.3.3` 首次返回 `404 tarball, folder, http url, or git url`——本地 packument 缓存仍是发布前的旧文档；改用 `--prefer-online` 或直连下载绕开。发布后 tarball 端点也晚于元数据端点可用（元数据 200 时 tarball 一度 `{"error":"Not found"}`，约 4–6 分钟后可取）。
 
 ### 10.2 修复后在线回归（运行中实例、真实 HTTP、仅只读请求）
 
