@@ -289,6 +289,29 @@ test('http transport: a refused response becomes E_FEEDBACK_TRANSPORT with the s
   )
 })
 
+test('http transport: Authorization keeps the Bearer scheme but a custom header sends the bare token', async () => {
+  // Pre-0.3.4 the header value was always `Bearer ${apiToken}` even when the
+  // operator configured DSH_CRB_MAIL_API_AUTH_HEADER=X-Api-Key. Most relays
+  // behind a custom header expect the raw secret and reject a Bearer-prefixed
+  // one, so 401 became unavoidable for any non-Authorization transport.
+  const recorder = recordingFetch()
+  const bearerService = makeService({
+    env: { ...WEB_ENV, [FEEDBACK_ENV.authHeader]: 'Authorization' },
+    fetchImpl: recorder.fetchImpl,
+  })
+  await bearerService.submit({ title: '一个可以复现的问题', body: '这就是足够长的正文内容。' })
+  assert.equal(recorder.calls.at(-1).init.headers.authorization, 'Bearer test-token')
+
+  const apiKeyRecorder = recordingFetch()
+  const apiKeyService = makeService({
+    env: { ...WEB_ENV, [FEEDBACK_ENV.authHeader]: 'X-Api-Key' },
+    fetchImpl: apiKeyRecorder.fetchImpl,
+  })
+  await apiKeyService.submit({ title: '一个可以复现的问题', body: '这就是足够长的正文内容。' })
+  assert.equal(apiKeyRecorder.calls.at(-1).init.headers['x-api-key'], 'test-token')
+  assert.equal(apiKeyRecorder.calls.at(-1).init.headers.authorization, undefined)
+})
+
 test('rate limit: a failed delivery refunds its slot instead of spending the cap', async () => {
   const service = makeService({
     configOverrides: { feedback: { rateLimitPerHour: 1 } },

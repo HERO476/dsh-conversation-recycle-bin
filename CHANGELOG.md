@@ -3,6 +3,22 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.4] — 2026-10-20
+
+对应 `AUDIT-2026-10-20-last3-versions.md` 的四条非阻塞隐患 N1–N4，以及测试驱动下新发现的 P3 回归 N5。
+
+### Fixed
+
+- **N1：批量删除中途限流会静默丢尾项**：`deletePlan` 循环里 `!reservation.ok` 分支的 `break` 改为 `continue`。0.3.3 之前当第二 Host 在 preflight 与 take 之间抢走额度、或 `sessions.length > limiter.remaining`（跨进程 / 时间窗滑动）时，第一条被拒之后的所有 session 既不进 `results` 也不进 `failures`——一次 50 项批量 + 20/min 上限下，第 22–50 项从 UI 反馈里凭空消失。`continue` 让每一项各得一条 `E_RATE_LIMITED` 记录；首个项目预算不足直接抛 429 的既有契约不变。新增 `test/api.test.mjs` 用例：monkey-patch limiter 让 take 从第二次起即失败，断言 3 项批量 → 1 结果 + 2 失败。
+- **N2：审计 `tail()` 字节窗口对齐到 `\n` 时丢一条完整记录**：`start > 0` 分支不再无条件 `rawLines.slice(1)`——先读 `start-1` 一字节，`\n` 意味着窗口从行首开始，`rawLines[0]` 是完整 JSON 保留；否则才丢。同时 `CHUNK` 抽为 `createAuditLog({ tailWindowBytes })` 便于回归。新增 `test/trash-audit.test.mjs` 用例：对齐窗口断言三条完整记录全在，偏移 1 字节窗口断言撕裂片段被正确丢弃。
+- **N5（连带发现）：`tail()` 从未真正做窗口读**：Node `fs.readFile(path, {encoding,flag,signal})` 不接受 `start/end`，0.3.3 P3「只读尾部 256KB」的实现其实每次仍全量读盘。改用 `fsApi.open(filePath, 'r')` + `FileHandle.read(buffer, offset, length, position)` 的位置化读，`stat` 也走 handle；`fsApi` 类型签名加 `open`。修复后 5MB 审计文件 tail 只吃 256KB 内存，与 P3 原意一致。
+- **N3：HTTP 反馈通道对自定义鉴权头也强加 `Bearer ` 前缀**：`deliverHttp` 现只在 `authHeader === 'Authorization'` 时前缀 `Bearer `（RFC 7235 语法的合法要求），其它如 `X-Api-Key` / `x-goog-api-key` 直接发送裸 token——多数非 `Authorization` 中转拒绝 Bearer 前缀，此前配任何自定义头都会 401。默认 `Authorization` 通道逐字节不变。新增 `test/feedback.test.mjs` 双 case 用例（Bearer vs 裸 token）。
+- **N4：`visitorAsFrom: true` 的 UI 提示未说明与常见发信方冲突**：`feedback.emailHintAsFrom` 词条中英各扩写为完整句子，说明「QQ / 163 / Gmail 一类要求 From 与登录账号一致会拒收，仅允许任意 From 的中继才生效」。行为不变、配置不变。
+
+### Changed / Maintenance
+
+- 回归测试：`api` 38 → 39、`feedback` 18 → 19、`trash-audit` 3 → 4；总 128 → **131 全绿**。
+
 ## [0.3.3] — 2026-10-19
 
 本次修复对应 `AUDIT-2026-10-19-review.md` 的 S1–S3、P1–P5、R1–R4 与 M 项；每条均带回归测试。

@@ -66,3 +66,46 @@ test('audit: append + tail, malformed lines counted, compaction keeps the newest
     await home.cleanup()
   }
 })
+
+test('audit: tail keeps the first window line when the byte boundary lands on a newline', async () => {
+  // The 256KB window in tail() used to unconditionally drop rawLines[0] on a
+  // start>0 read, assuming the window began mid-line. When the boundary
+  // happened to align with a newline, the first complete record was lost.
+  // tailWindowBytes is injectable so this test can drive the exact byte
+  // layout without writing hundreds of kilobytes to disk.
+  const home = await makeTempHome()
+  try {
+    const filePath = join(home.root, 'audit.jsonl')
+    const records = [
+      { id: 'before-window', action: 'delete', result: 'success' },
+      { id: 'first-on-boundary', action: 'restore', result: 'success' },
+      { id: 'second', action: 'purge', result: 'success' },
+      { id: 'last', action: 'delete', result: 'success' },
+    ]
+    const body = records.map((record) => `${JSON.stringify(record)}\n`).join('')
+    await writeFile(filePath, body, 'utf8')
+    const total = Buffer.byteLength(body, 'utf8')
+
+    // A window that starts at the last three lines' combined length means the
+    // byte at `start-1` is the `\n` after `before-window`: the tail must keep
+    // `first-on-boundary` intact.
+    const tailThree = Buffer.byteLength(records.slice(1).map((record) => `${JSON.stringify(record)}\n`).join(''), 'utf8')
+    const boundaryAudit = createAuditLog({ filePath, tailWindowBytes: tailThree })
+    assert.equal(total - tailThree, Buffer.byteLength(`${JSON.stringify(records[0])}\n`, 'utf8'))
+    const boundary = await boundaryAudit.tail(50)
+    const boundaryIds = boundary.records.map((record) => record.id)
+    assert.deepEqual(boundaryIds, ['first-on-boundary', 'second', 'last'])
+    assert.equal(boundary.malformed, 0)
+
+    // Contrast: a window one byte smaller starts mid-line inside
+    // `first-on-boundary`; the fragment must be dropped and only the two
+    // complete trailing records returned.
+    const midLineAudit = createAuditLog({ filePath, tailWindowBytes: tailThree - 1 })
+    const midLine = await midLineAudit.tail(50)
+    const midLineIds = midLine.records.map((record) => record.id)
+    assert.deepEqual(midLineIds, ['second', 'last'])
+    assert.equal(midLine.malformed, 0)
+  } finally {
+    await home.cleanup()
+  }
+})

@@ -190,7 +190,7 @@ dsh-conversation-recycle-bin/
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 122 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 131 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -199,7 +199,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（122 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（131 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -258,8 +258,8 @@ npm run check   # 语法 + manifest
 | `DSH_CRB_FEEDBACK_TO` | 收件人（优先于 `feedback.to`） |
 | `DSH_CRB_FEEDBACK_FROM` | 发件人（优先于 `feedback.from`） |
 | `DSH_CRB_MAIL_API_URL` | 邮件 HTTP API 地址（Resend 兼容形状，也可指向自建转发网关） |
-| `DSH_CRB_MAIL_API_TOKEN` | 该 API 的 Bearer token |
-| `DSH_CRB_MAIL_API_AUTH_HEADER` | 可选，鉴权头名，默认 `authorization`，值为 `Bearer <token>` |
+| `DSH_CRB_MAIL_API_TOKEN` | 该 API 的鉴权 token |
+| `DSH_CRB_MAIL_API_AUTH_HEADER` | 可选，鉴权头名，默认 `authorization`；`authorization` 时值形如 `Bearer <token>`（RFC 7235），其它自定义头（如 `x-api-key`）直接发送裸 token |
 | `DSH_CRB_SMTP_URL` | SMTP 连接串，如 `smtps://user:pass@smtp.example.com:465` |
 
 HTTP 通道发出的 JSON 固定为 `{from, to: [收件人], subject, text, reply_to}`，`text` 是纯文本（不生成 HTML）；`reply_to` 取自表单里访客填写的邮箱（留空则不填）。SMTP 通道按需 `import('nodemailer')`：它已声明为 `optionalDependencies`（`^10.1.2`），正常安装会随包就位；以 `link:` 方式开发安装时插件从自身真实目录解析，需在**本仓库**跑一次 `npm install`。仍未安装时返回 `E_FEEDBACK_TRANSPORT` + `reason: nodemailer-missing`。
@@ -287,8 +287,8 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
-node test/feedback.test.mjs        # 17 个反馈用例
-npm test                           # 全量 122 个用例
+node test/feedback.test.mjs        # 19 个反馈用例
+npm test                           # 全量 131 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'

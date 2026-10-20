@@ -13,6 +13,7 @@ import { callRoute, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession
 
 const S1 = 'session-aaaaaaaa-1111'
 const S2 = 'session-bbbbbbbb-2222'
+const S3 = 'session-dddddddd-4444'
 const ORPHAN = 'session-cccccccc-3333'
 const HEADERS = {
   'x-conversation-recycle-bin': '1',
@@ -50,7 +51,7 @@ async function makeFixture({
   const home = await makeTempHome()
   const workspaceRegistry = makeWorkspaceRegistry([
     { id: 'ws-1', path: 'D:\\Work', title: 'Work', sessionIds: [S1] },
-    { id: 'ws-2', path: 'D:\\Other', title: 'Other', sessionIds: [S2] },
+    { id: 'ws-2', path: 'D:\\Other', title: 'Other', sessionIds: [S2, S3] },
   ])
   const seeded = new Map()
   const items = []
@@ -58,6 +59,7 @@ async function makeFixture({
     const meta = {
       [S1]: { cwd: 'D:\\Work', title: 'Alpha chat', eventCount: 12 },
       [S2]: { cwd: 'D:\\Other', title: 'Beta chat', eventCount: 8 },
+      [S3]: { cwd: 'D:\\Other', title: 'Gamma chat', eventCount: 5 },
       [ORPHAN]: { cwd: 'D:\\Unregistered', title: 'Orphan chat', eventCount: 3 },
     }[sessionId]
     seeded.set(sessionId, await seedSession(home, {
@@ -983,6 +985,55 @@ test('rate limit: a failed item refunds its slot; only successes count against t
 
     const state = await call(fixture.api, '/state', { method: 'GET' })
     assert.equal(state.body.state.limits.rate.used, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('rate limit: a mid-plan refusal records every remaining session as a failure', async () => {
+  // Pre-0.3.4 the loop `break`ed after pushing the first exhausted item, so a
+  // batch of 3 that ran out mid-loop produced {results:[S1], failures:[S2]}
+  // and S3 silently disappeared from both arrays. The fix `continue`s: each
+  // remaining session gets its own rate-limited failure record.
+  //
+  // Both /preview and /delete enforce `sessions.length <= limiter.remaining`,
+  // so the natural HTTP path never sees a shrinking budget mid-loop. This
+  // test monkey-patches the live limiter to succeed once then refuse, which
+  // is what a second Host process consuming the same window would do.
+  const fixture = await makeFixture({
+    configOverrides: { maxDeletesPerMinute: 3 },
+    sessionIds: [S1, S2, S3],
+  })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1, S2, S3], includeMemory: false, mode: 'hard' } })
+    assert.equal(preview.status, 200)
+    assert.equal(preview.body.preview.confirmation?.token !== undefined, true)
+
+    const limiter = fixture.api.handler_services.limiter
+    const realTake = limiter.take.bind(limiter)
+    let callCount = 0
+    limiter.take = (cost) => {
+      callCount += 1
+      if (callCount === 1) return realTake(cost)
+      return { ok: false, retryAfterMs: 42_000, limit: limiter.status().limit }
+    }
+
+    try {
+      const batch = await call(fixture.api, '/delete', {
+        body: { sessionIds: [S1, S2, S3], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+      })
+      assert.equal(batch.status, 200)
+      assert.equal(batch.body.results.length, 1)
+      assert.equal(batch.body.results[0].sessionId, S1)
+      assert.equal(batch.body.failures.length, 2)
+      assert.deepEqual(
+        batch.body.failures.map((failure) => failure.sessionId).sort(),
+        [S2, S3].sort(),
+      )
+      assert.ok(batch.body.failures.every((failure) => failure.error.code === 'E_RATE_LIMITED'))
+    } finally {
+      limiter.take = realTake
+    }
   } finally {
     await fixture.home.cleanup()
   }
