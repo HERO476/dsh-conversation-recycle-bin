@@ -3,6 +3,32 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.5] — 2026-10-22
+
+对应 `AUDIT-2026-10-22-desktop-web-compat.md`：把 0.3.4 之后一直只存在于工作树的修复正式发布，并落地该报告 §9 的全部建议。
+
+### Fixed
+
+- **C-01 前缀部署下所有 API 丢失路径前缀**：`client.js` 新增 `apiUrl()`，用 `new URL('.', document.baseURI)` 归一化 base 并去掉 `API_PREFIX` 的前导斜杠，改为文档相对解析。`dsh web --public-url https://host/ui/` 下不再 404；桌面 `dsh-app://app/` 行为不变。0.3.4 的 tarball 仍带此缺陷（`new URL('/conversation-recycle-bin/api…', base)` 会替换整个 base 路径）。新增回归用例断言三种 base（根、`…/ui/`、`…/ui/index.html`、`dsh-app://app/`）解析结果。
+- **C-02 回收站写操作超时短于宿主排队**：客户端 `TRASH_MUTATION_TIMEOUT_MS = 195s`，宿主 `TRASH_LOCK_BUDGET_MS = 180s`（此前 15s / 30s）。批量删除进行中再点恢复/彻底删除，不再出现"界面报错但宿主已执行"。
+- **C-08 锁预算用例一直是红的**：该用例用软删除条目测 `discard`，而软删除按设计保留会话日志，`performDiscard` 必然返回 `E_TRASH_CONFLICT`（409）。改为 seed 一个从未提交的 `pending` 条目（无 `session/`、无 `memory/`），api 用例数 40 → 41 全绿。此前 0.3.4 的 `npm test` 因该用例无法通过而不能作为发布门禁。
+
+### Added
+
+- **C-03 `allowedHosts`**：反代部署的精确 authority 白名单（`host`、`host:port`、`[v6]:port`）。裸主机放行任意端口，带端口的条目只放行该端口；带 scheme/路径/userinfo/通配符的条目会被丢弃并写入 warnings。默认 `[]` = 仅回环，与 0.3.4 行为一致。这样不必为了让反代可用而整体打开 `allowNonLoopback`。`config.schema.json`、`cordis.patch.yml`、README §4.2 同步。
+
+### Changed / Performance
+
+- **P-01 `/trash` 双扫描合并**：`trash.scanAll()` 一次 `readdir` 产出 `{entries, unreadable}`，每条目只读一次 manifest，读取用 8 并发（此前 `listAll` + `scanUnreadable` 各扫一遍，合计 2 次 readdir + 2N 次读，且 `listAll` 串行）。0/50/200/500 条实测 1.2/17.2/63.3/156.3 ms → **1/4.9/14.4/38.1 ms**。
+- **P-02 `/preview` 记忆索引只解析一次**：适配器按 `mtimeMs:size` 缓存已解析快照，`probe()` 与 `countSessions()` 共用；本适配器每次写索引后主动失效，其他进程改写由 stat key 识别。21000 节点（1.9 MB）单条预览 39.2 → **28.9 ms**（剩余部分是单次读盘 + 解析的固有成本）。
+- **P-05 设置页按 tab 懒加载**：挂载/切换只拉当前 tab 需要的接口（回收站 `/trash`、批量 `/sessions`、审计 `/audit`），`/state` 仅在挂载与变更后取；刷新期间面板不再卸载，改为顶部细条指示，滚动位置与输入焦点不再丢失。对应把每次刷新 4 个请求（≈31 KB）降为 1–2 个。
+- **P-04 宽限等待可见化**：彻底删除模式下对话框说明"刚使用过的对话可能多等约 1.5 秒"；提交超过 1.2s 后显示"仍在执行：正在确认没有其他 DSH 实例写入该对话"。等待本身（`foreignWriterGraceMs`）是安全设计，未取消。
+
+### Maintenance
+
+- 测试 131 → **138**（api 41、client 22、core 15、memory 13、cascade 15、feedback 19、manifest 9、trash-audit 4）。
+- README 状态 0.2.2 → 0.3.5，用例计数与设置页/反代说明同步。
+
 ## [0.3.4] — 2026-10-20
 
 对应 `AUDIT-2026-10-20-last3-versions.md` 的四条非阻塞隐患 N1–N4，以及测试驱动下新发现的 P3 回归 N5。

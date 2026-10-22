@@ -359,3 +359,39 @@ test('memory service: a multi-adapter restore keeps every bundle until all adapt
   }
 })
 
+
+test('lingshu adapter: a preview reads the index once, and a rewrite invalidates the snapshot', async () => {
+  // `/preview` probes the adapter and then counts nodes; both used to read and
+  // parse the whole index (39 ms at 21k nodes). The stat-keyed snapshot makes
+  // the second step free while still seeing a concurrent md_cg rewrite.
+  const store = await makeStore()
+  try {
+    const fsPromises = await import('node:fs/promises')
+    let indexReads = 0
+    const fsApi = {
+      ...fsPromises,
+      async readFile(file, ...rest) {
+        if (String(file).endsWith('_index.json')) indexReads += 1
+        return fsPromises.readFile(file, ...rest)
+      },
+    }
+    const adapter = createLingshuAdapter({ rootDir: store.root, fsApi })
+    assert.equal((await adapter.probe()).available, true)
+    assert.equal(indexReads, 1)
+    const first = await adapter.countSessions([SESSION_1])
+    assert.equal(indexReads, 1, 'the count must reuse the probe snapshot')
+    assert.equal(first.counts.get(SESSION_1), 3)
+
+    // A different writer adds a node without going through this adapter.
+    const index = JSON.parse(await fsPromises.readFile(join(store.root, '_index.json'), 'utf8'))
+    index.nodes.n7 = { session: SESSION_1, path: 'contextual/n7.md', protected: null }
+    await writeFile(join(store.root, 'contextual', 'n7.md'), '# n7\n', 'utf8')
+    await writeFile(join(store.root, '_index.json'), JSON.stringify(index), 'utf8')
+
+    const second = await adapter.countSessions([SESSION_1])
+    assert.equal(indexReads, 2)
+    assert.equal(second.counts.get(SESSION_1), 4)
+  } finally {
+    await store.cleanup()
+  }
+})

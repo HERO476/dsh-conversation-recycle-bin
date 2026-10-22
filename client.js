@@ -101,6 +101,8 @@ window.__ModuleLoader__.load({
         'dialog.phraseLabel': 'Confirmation',
         'dialog.delete': 'Delete',
         'dialog.working': 'Deleting…',
+        'dialog.stillWorking': 'Still working — confirming no other DSH instance is writing this conversation.',
+        'dialog.hardGraceHint': 'Permanent deletion re-checks the log for a second writer first, so a conversation used moments ago can take about 1.5s longer.',
         'dialog.loading': 'Reading the plan…',
         'dialog.done': 'Deleted {count} conversation(s); {memory} memory entries moved to the recycle bin.',
         'dialog.partial': 'Deleted {done}, failed {failed}.',
@@ -255,6 +257,8 @@ window.__ModuleLoader__.load({
         'dialog.phraseLabel': '确认',
         'dialog.delete': '删除',
         'dialog.working': '正在删除…',
+        'dialog.stillWorking': '仍在执行：正在确认没有其他 DSH 实例写入该对话。',
+        'dialog.hardGraceHint': '彻底删除会先复查日志是否还有第二个写入方；刚使用过的对话可能多等约 1.5 秒。',
         'dialog.loading': '正在读取删除计划…',
         'dialog.done': '已删除 {count} 个对话；移入回收站的记忆条目 {memory} 条。',
         'dialog.partial': '成功 {done} 个，失败 {failed} 个。',
@@ -472,6 +476,23 @@ window.__ModuleLoader__.load({
     const API_PREFIX = '/conversation-recycle-bin/api'
     const REQUEST_TIMEOUT_MS = 15_000
     const MUTATION_TIMEOUT_MS = 180_000
+    /**
+     * Recycle-bin writes wait for the Host's cross-process lock, and that wait
+     * is unbounded in wall-clock terms: the request queues behind whatever
+     * mutation is already running (`serialize()` chains in-process first). A
+     * 15s budget therefore aborted restore / purge / discard while the Host was
+     * still working, so the UI reported a failure for a change that did happen.
+     * The Host caps its own lock wait at TRASH_LOCK_BUDGET_MS (180s); this sits
+     * just above it so the Host's own answer always wins the race.
+     */
+    const TRASH_MUTATION_TIMEOUT_MS = 195_000
+    /**
+     * How long a delete may run before the dialog says what it is waiting for.
+     * A hard delete of a conversation written moments ago spends
+     * `foreignWriterGraceMs` (1.5s) re-checking the log for a second writer;
+     * without a hint the danger button looked stuck.
+     */
+    const SLOW_SUBMIT_HINT_MS = 1_200
 
     /**
      * A batch is one HTTP request that can stop several live sessions (each up
@@ -493,14 +514,39 @@ window.__ModuleLoader__.load({
     ApiError.prototype = Object.create(Error.prototype)
     ApiError.prototype.constructor = ApiError
 
+    /**
+     * Resolve a plugin route against the PAGE, not against the origin.
+     *
+     * `dsh web` can be mounted under a path prefix (`--public-url
+     * https://host/ui/`, stripped by a front proxy). DSH's own client stays
+     * document-relative for exactly this reason: `dsh-client-connection` builds
+     * its requests with `` `${channel}/${endpoint}`.slice(1) `` and resolves
+     * them against `document.baseURI`. An absolute `/conversation-recycle-bin/…`
+     * would replace the whole base path, drop the prefix, and 404 every call.
+     * Keeping the same rule means one code path works for `http://127.0.0.1:<p>/`,
+     * `https://host/<prefix>/` and the desktop shell's `dsh-app://app/`.
+     */
+    function apiUrl(path) {
+      let base = 'http://127.0.0.1/'
+      if (typeof document !== 'undefined' && typeof document.baseURI === 'string' && document.baseURI !== '') {
+        try {
+          // Normalise to the containing directory so a base without a trailing
+          // slash (`…/index.html`) does not swallow the last segment.
+          base = new URL('.', document.baseURI).href
+        } catch {
+          base = 'http://127.0.0.1/'
+        }
+      }
+      return new URL(`${API_PREFIX.replace(/^\//, '')}${path}`, base)
+    }
+
     async function api(path, options = {}) {
       const method = options.method ?? 'GET'
       const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : REQUEST_TIMEOUT_MS
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
-        const base = typeof document !== 'undefined' && typeof document.baseURI === 'string' ? document.baseURI : 'http://127.0.0.1/'
-        const url = new URL(`${API_PREFIX}${path}`, base)
+        const url = apiUrl(path)
         const headers = { 'x-conversation-recycle-bin': '1' }
         if (options.body !== undefined) headers['content-type'] = 'application/json'
         const response = await fetch(url, {
@@ -938,6 +984,9 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(null)
       const [phrase, setPhrase] = useState('')
       const [done, setDone] = useState(null)
+      // Set when a submission outlives SLOW_SUBMIT_HINT_MS, so the dialog can
+      // explain the wait instead of showing a frozen danger button.
+      const [slow, setSlow] = useState(false)
 
       // Dismissing the result must also complete a reload the Host armed
       // because it cannot close the deleted conversation in place; otherwise
@@ -984,6 +1033,15 @@ window.__ModuleLoader__.load({
         }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
+      }, [busy])
+
+      useEffect(() => {
+        if (busy !== true) {
+          setSlow(false)
+          return undefined
+        }
+        const timer = setTimeout(() => setSlow(true), SLOW_SUBMIT_HINT_MS)
+        return () => clearTimeout(timer)
       }, [busy])
 
       const firstSession = preview?.sessions?.[0] ?? null
@@ -1120,6 +1178,11 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'dc-live-warning', role: 'status' }, t('dialog.liveStopHint'))
             : null,
 
+          // Permanent deletion waits out `foreignWriterGraceMs` when the log was
+          // written moments ago (measured: ~1.5s once per batch). Say so before
+          // the click, not after the user thinks the button is stuck.
+          mode === 'hard' ? h('p', { className: 'dc-hint' }, t('dialog.hardGraceHint')) : null,
+
           h('div', { className: 'dc-memory' },
             h(Checkbox, {
               checked: includeMemory,
@@ -1160,6 +1223,10 @@ window.__ModuleLoader__.load({
                 autoFocus: true,
                 className: 'dc-input',
               }))
+            : null,
+
+          slow === true
+            ? h('div', { className: 'dc-live-warning', role: 'status' }, t('dialog.stillWorking'))
             : null,
 
           h('div', { className: 'dc-actions' },
@@ -1518,7 +1585,10 @@ window.__ModuleLoader__.load({
       const [trash, setTrash] = useState([])
       const [incomplete, setIncomplete] = useState([])
       const [audit, setAudit] = useState([])
-      const [loading, setLoading] = useState(true)
+      // Which tab is fetching right now. `null` means idle: the panels stay
+      // mounted while a refresh runs, so the user keeps scroll position and
+      // never sees the whole section blink on every restore/purge.
+      const [tabBusy, setTabBusy] = useState(null)
       const [error, setError] = useState(null)
       const [selected, setSelected] = useState(() => new Set())
       const [purgeTarget, setPurgeTarget] = useState(null)
@@ -1532,54 +1602,100 @@ window.__ModuleLoader__.load({
       // Two refreshes can overlap (mount, mutation broadcast, and the refresh a
       // purge triggers), and the older response must not overwrite the newer.
       const refreshSerial = useRef(0)
+      // The mutation version each tab's data was fetched at. `-1` = never.
+      const loadedRef = useRef({ trash: -1, batch: -1, audit: -1 })
 
-      const refresh = useCallback(async () => {
+      const refreshState = useCallback(async () => {
+        const response = await api('/state')
+        setState(response.state)
+      }, [])
+
+      /**
+       * Fetch only what the visible tab renders. The section used to pull
+       * `/state`, `/sessions`, `/trash` and `/audit` on every mount and every
+       * mutation (~31 KB, 4 round trips) even when the user was looking at one
+       * tab. `/sessions` is the expensive one (one projection read per row),
+       * so opening the recycle bin must not pay for it.
+       */
+      const loadTab = useCallback(async (which, { force = false } = {}) => {
+        if (!force && loadedRef.current[which] === mutationVersion) return
         const serial = refreshSerial.current + 1
         refreshSerial.current = serial
         const stale = () => serial !== refreshSerial.current
-        setLoading(true)
+        setTabBusy(which)
         setError(null)
         try {
-          const [stateResponse, sessionsResponse, trashResponse, auditResponse] = await Promise.all([
-            api('/state'),
-            api('/sessions'),
-            api('/trash'),
-            api('/audit?limit=50'),
-          ])
-          if (stale()) return
-          const nextSessions = Array.isArray(sessionsResponse.sessions) ? sessionsResponse.sessions : []
-          setState(stateResponse.state)
-          setSessions(nextSessions)
-          setTrash(Array.isArray(trashResponse.entries) ? trashResponse.entries : [])
-          setIncomplete(Array.isArray(trashResponse.incomplete) ? trashResponse.incomplete : [])
-          setAudit(Array.isArray(auditResponse.records) ? auditResponse.records : [])
-          // Drop selections whose conversation no longer exists.
-          setSelected((current) => {
-            const alive = new Set(nextSessions.map((session) => session.id))
-            const next = new Set([...current].filter((id) => alive.has(id)))
-            return next.size === current.size ? current : next
-          })
+          if (which === 'trash') {
+            const response = await api('/trash')
+            if (stale()) return
+            setTrash(Array.isArray(response.entries) ? response.entries : [])
+            setIncomplete(Array.isArray(response.incomplete) ? response.incomplete : [])
+          } else if (which === 'batch') {
+            const response = await api('/sessions')
+            if (stale()) return
+            const nextSessions = Array.isArray(response.sessions) ? response.sessions : []
+            setSessions(nextSessions)
+            // Drop selections whose conversation no longer exists.
+            setSelected((current) => {
+              const alive = new Set(nextSessions.map((session) => session.id))
+              const next = new Set([...current].filter((id) => alive.has(id)))
+              return next.size === current.size ? current : next
+            })
+          } else {
+            const response = await api('/audit?limit=50')
+            if (stale()) return
+            setAudit(Array.isArray(response.records) ? response.records : [])
+          }
+          loadedRef.current[which] = mutationVersion
         } catch (caught) {
           if (!stale()) setError(caught)
         } finally {
-          if (!stale()) setLoading(false)
+          if (!stale()) setTabBusy(null)
         }
-      }, [])
+      }, [mutationVersion])
 
-      useEffect(() => { void refresh() }, [refresh])
-
-      // A deletion or restore performed from the dialog must also update this
-      // section's own session/trash copies.
+      // `/state` drives the capability block and the limits; refetch it on
+      // mount and whenever a mutation happened, not on every tab switch.
       useEffect(() => {
-        if (mutationVersion > 0) void refresh()
-      }, [mutationVersion, refresh])
+        refreshState().catch((caught) => setError(caught))
+      }, [mutationVersion, refreshState])
+
+      // The active tab's own slice, on mount, on tab switch, and after a
+      // mutation (which changes `loadTab`'s identity through the version).
+      useEffect(() => {
+        void loadTab(tab)
+      }, [tab, loadTab])
+
+      /** Header "refresh" button: re-read state and the visible tab. */
+      const refresh = useCallback(async () => {
+        await Promise.all([
+          refreshState().catch((caught) => setError(caught)),
+          loadTab(tab, { force: true }),
+        ])
+      }, [tab, refreshState, loadTab])
+
+      /**
+       * Mark a slice stale without fetching it. Recycle-bin actions call
+       * `refreshAfterMutation({ notify: false })`, so no version bump happens:
+       * the visible tab is re-read by `refresh()`, and any other tab must be
+       * re-read the next time the user opens it instead of showing rows that
+       * were deleted a moment ago.
+       */
+      const markStale = useCallback((...which) => {
+        for (const name of which) loadedRef.current[name] = -1
+      }, [])
 
       async function restore(trashId) {
         setError(null)
         const entry = trash.find((item) => item.trashId === trashId)
         try {
-          await api('/trash/restore', { method: 'POST', body: { trashId } })
+          await api('/trash/restore', {
+            method: 'POST',
+            body: { trashId },
+            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+          })
           flashStore.show(t('trash.restored'))
+          markStale('trash', 'batch')
           await refresh()
           await refreshAfterMutation({
             sessionIds: typeof entry?.sessionId === 'string' ? [entry.sessionId] : [],
@@ -1601,8 +1717,13 @@ window.__ModuleLoader__.load({
         setError(null)
         setRestoreBusyId(trashId)
         try {
-          await api('/trash/restore', { method: 'POST', body: { trashId } })
+          await api('/trash/restore', {
+            method: 'POST',
+            body: { trashId },
+            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+          })
           flashStore.show(t('trash.restored'))
+          markStale('trash', 'batch')
           await refresh()
           await refreshAfterMutation({
             sessionIds: incomplete.find((item) => item.trashId === trashId)?.sessionId
@@ -1624,10 +1745,15 @@ window.__ModuleLoader__.load({
         setError(null)
         const entry = trash.find((item) => item.trashId === trashId)
         try {
-          await api('/trash/purge', { method: 'POST', body: { trashId, confirmPhrase: phrase } })
+          await api('/trash/purge', {
+            method: 'POST',
+            body: { trashId, confirmPhrase: phrase },
+            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+          })
           flashStore.show(t('trash.purged'))
           setPurgeTarget(null)
           setPurgePhrase('')
+          markStale('trash', 'batch')
           await refresh()
           // Purging a soft entry detaches the session from its workspace.
           await refreshAfterMutation({
@@ -1647,10 +1773,15 @@ window.__ModuleLoader__.load({
         setDiscardBusyId(trashId)
         setError(null)
         try {
-          await api('/trash/discard', { method: 'POST', body: { trashId, confirmPhrase: phrase } })
+          await api('/trash/discard', {
+            method: 'POST',
+            body: { trashId, confirmPhrase: phrase },
+            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+          })
           flashStore.show(t('trash.discarded'))
           setDiscardTarget(null)
           setDiscardPhrase('')
+          markStale('trash')
           await refresh()
         } catch (caught) {
           setError(caught)
@@ -1700,7 +1831,7 @@ window.__ModuleLoader__.load({
             h('h1', { className: 'dc-title' }, t('section.title')),
             h('p', { className: 'dc-hint' }, t('section.subtitle'))),
           h('div', { className: 'dc-header-actions' },
-            h(Button, { onClick: () => { void refresh() }, disabled: loading, title: t('action.refresh') },
+            h(Button, { onClick: () => { void refresh() }, disabled: tabBusy !== null, title: t('action.refresh') },
               h(GlyphRefresh, { size: 13 }), ' ', t('action.refresh')))),
 
         h(ErrorBanner, { error }),
@@ -1729,9 +1860,14 @@ window.__ModuleLoader__.load({
           h('button', { id: 'dc-tab-batch', type: 'button', role: 'tab', 'aria-selected': tab === 'batch', 'aria-controls': 'dc-panel-batch', className: `dc-tab${tab === 'batch' ? ' dc-tab-active' : ''}`, onClick: () => setTab('batch') }, t('batch.title')),
           h('button', { id: 'dc-tab-audit', type: 'button', role: 'tab', 'aria-selected': tab === 'audit', 'aria-controls': 'dc-panel-audit', className: `dc-tab${tab === 'audit' ? ' dc-tab-active' : ''}`, onClick: () => setTab('audit') }, t('audit.title'))),
 
-        loading ? h(Spinner, { label: t('dialog.loading') }) : null,
+        // First paint only: once anything has been rendered, a refresh keeps the
+        // panels mounted and shows the inline indicator below instead.
+        state === null && tabBusy !== null ? h(Spinner, { label: t('dialog.loading') }) : null,
+        state !== null && tabBusy !== null
+          ? h('div', { className: 'dc-loading' }, h('span', { className: 'dc-spinner' }), ' ', t('dialog.loading'))
+          : null,
 
-        tab === 'trash' && !loading ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
+        tab === 'trash' ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
           trash.length === 0 ? h('div', { className: 'dc-empty' }, t('trash.empty')) : null,
           ...trash.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
@@ -1754,7 +1890,7 @@ window.__ModuleLoader__.load({
                   h(Button, { disabled: purgeBusy === true, onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
                 : h(Button, { variant: 'danger', onClick: () => { setPurgeTarget(entry.trashId); setPurgePhrase('') } }, t('action.purge')))))) : null,
 
-        tab === 'trash' && !loading && incomplete.length > 0 ? h(IncompleteEntries, {
+        tab === 'trash' && incomplete.length > 0 ? h(IncompleteEntries, {
           entries: incomplete,
           discardTarget,
           discardPhrase,
@@ -1767,7 +1903,7 @@ window.__ModuleLoader__.load({
           discardBusyId,
         }) : null,
 
-        tab === 'batch' && !loading ? h('div', { id: 'dc-panel-batch', role: 'tabpanel', 'aria-labelledby': 'dc-tab-batch', className: 'dc-panel' },
+        tab === 'batch' ? h('div', { id: 'dc-panel-batch', role: 'tabpanel', 'aria-labelledby': 'dc-tab-batch', className: 'dc-panel' },
           h('div', { className: 'dc-batch-bar' },
             h('span', { className: 'dc-hint' }, t('batch.selected', { count: selectedIds.length })),
             // "Select all" only marks deletable rows: a batch containing one
@@ -1793,7 +1929,7 @@ window.__ModuleLoader__.load({
             onToggle: toggle,
           }))) : null,
 
-        tab === 'audit' && !loading ? h('div', { id: 'dc-panel-audit', role: 'tabpanel', 'aria-labelledby': 'dc-tab-audit', className: 'dc-panel' },
+        tab === 'audit' ? h('div', { id: 'dc-panel-audit', role: 'tabpanel', 'aria-labelledby': 'dc-tab-audit', className: 'dc-panel' },
           audit.length === 0 ? h('div', { className: 'dc-empty' }, t('audit.empty')) : null,
           ...audit.map((record) => h('div', { key: record.id, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
@@ -1974,6 +2110,15 @@ window.__ModuleLoader__.load({
     exports.__store = { dialogStore, flashStore, mutationStore, uiFlagsStore }
     exports.__refreshAfterMutation = refreshAfterMutation
     exports.__mutationTimeoutMs = mutationTimeoutMs
+    // Exposed so the harness can assert the client budget stays ABOVE the
+    // Host's own TRASH_LOCK_BUDGET_MS: whichever side gives up first decides
+    // whether the user sees "failed" for work that actually completed.
+    exports.__requestBudgets = {
+      request: REQUEST_TIMEOUT_MS,
+      mutation: MUTATION_TIMEOUT_MS,
+      trashMutation: TRASH_MUTATION_TIMEOUT_MS,
+    }
+    exports.__apiUrl = apiUrl
     exports.__api = api
     // Direct component handles keep the hook-level behavior testable without a
     // DOM renderer (the registered wrapper alone only builds an element).

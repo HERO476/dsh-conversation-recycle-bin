@@ -22,6 +22,10 @@
         # unless the operator opts in explicitly below.
         requireSameOrigin: true
         allowNonLoopback: false
+        # Reverse-proxy deployments: list the exact authorities the proxy puts
+        # in `Host` (host, host:port). A bare host admits any port. Listing them
+        # is narrower than turning allowNonLoopback on for every hostname.
+        allowedHosts: []
         # Session ownership policy.
         allowOrphanSessions: false      # sessions with no registered workspace
         allowSubagentSessions: false    # sessions created by subagents

@@ -48,6 +48,26 @@ test('normalizeConfig: an empty adapter list degrades to the honest none adapter
   assert.deepEqual(value.memory.adapters, ['none'])
 })
 
+test('normalizeConfig: allowedHosts keeps only bare authorities and normalizes them', () => {
+  const { value, warnings } = normalizeConfig({
+    allowedHosts: [
+      'App.Example',
+      'app.example:8443',
+      '  app.example  ',
+      'https://app.example/ui/',
+      'app.example/path',
+      'user@app.example',
+      '*.example',
+      '',
+      42,
+    ],
+  })
+  // Case-folded, trailing dot removed, de-duplicated; anything with a scheme,
+  // path, userinfo or wildcard is dropped rather than silently widened.
+  assert.deepEqual(value.allowedHosts, ['app.example', 'app.example:8443'])
+  assert.equal(warnings.filter((line) => line.startsWith('allowedHosts')).length, 5)
+})
+
 test('resolveJsonPointer follows escaped segments', () => {
   const document = { nodes: { a: 1 }, 'a/b': { c: 2 } }
   assert.equal(resolveJsonPointer(document, '/nodes').a, 1)

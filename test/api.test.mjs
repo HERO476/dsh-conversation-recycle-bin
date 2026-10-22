@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
 import { createFileLock } from '../lib/core/file-lock.js'
-import { createDeleteApi, ROUTE_PREFIX } from '../lib/host/api.js'
+import { createDeleteApi, ROUTE_PREFIX, TRASH_LOCK_BUDGET_MS } from '../lib/host/api.js'
 import { createSessionLogOps } from '../lib/host/catalog.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
 import { resolveDataPaths } from '../lib/host/paths.js'
@@ -719,6 +719,68 @@ test('security: the full origin authority is compared, not just the hostname', a
   }
 })
 
+test('security: allowedHosts admits exactly the configured proxy authorities', async () => {
+  // A prefix-stripping reverse proxy presents its own hostname in `Host`; the
+  // only alternative used to be allowNonLoopback, which admits every hostname
+  // the machine is reachable by. The allowlist must be exact: a lookalike
+  // suffix or an unlisted port stays refused.
+  const blockedFixture = await makeFixture()
+  try {
+    const blocked = await call(blockedFixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example', origin: 'https://app.example' },
+    })
+    assert.equal(blocked.status, 403)
+    assert.equal(blocked.body.error.code, 'E_FORBIDDEN_HOST')
+    assert.deepEqual(blocked.body.error.details.allowedHosts, [])
+  } finally {
+    await blockedFixture.home.cleanup()
+  }
+
+  const bareHost = await makeFixture({ configOverrides: { allowedHosts: ['APP.Example.'] } })
+  try {
+    const httpDefault = await call(bareHost.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example', origin: 'https://app.example' },
+    })
+    assert.equal(httpDefault.status, 200)
+
+    // A bare entry admits any port, but the Origin still has to agree with it.
+    const withPort = await call(bareHost.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example:8443', origin: 'https://app.example:8443' },
+    })
+    assert.equal(withPort.status, 200)
+
+    const lookalike = await call(bareHost.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example.evil', origin: 'https://app.example.evil' },
+    })
+    assert.equal(lookalike.status, 403)
+    assert.equal(lookalike.body.error.code, 'E_FORBIDDEN_HOST')
+  } finally {
+    await bareHost.home.cleanup()
+  }
+
+  const pinnedPort = await makeFixture({ configOverrides: { allowedHosts: ['app.example:8443'] } })
+  try {
+    const match = await call(pinnedPort.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example:8443', origin: 'https://app.example:8443' },
+    })
+    assert.equal(match.status, 200)
+
+    const otherPort = await call(pinnedPort.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { host: 'app.example:9443', origin: 'https://app.example:9443' },
+    })
+    assert.equal(otherPort.status, 403)
+    assert.equal(otherPort.body.error.code, 'E_FORBIDDEN_HOST')
+  } finally {
+    await pinnedPort.home.cleanup()
+  }
+})
+
 test('connection: requestRejection short-circuits 401 and 403 before the route runs', async () => {
   for (const [rejection, status, code] of [[401, 401, 'E_UNAUTHORIZED'], [403, 403, 'E_FORBIDDEN_ORIGIN']]) {
     const fixture = await makeFixture({ connection: { requestRejection: () => rejection } })
@@ -1034,6 +1096,80 @@ test('rate limit: a mid-plan refusal records every remaining session as a failur
     } finally {
       limiter.take = realTake
     }
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('trash mutations ask the file lock for the long batch budget, not the generic default', async () => {
+  // restore / purge / discard can queue behind a whole batch delete, so the
+  // generic 15s lock timeout made the Host answer E_LOCK_BUSY for a request
+  // that only needed to wait. The Client budget (client.js
+  // TRASH_MUTATION_TIMEOUT_MS = 195s) is deliberately larger, so this lock
+  // budget - not the browser's AbortController - decides the outcome.
+  const waits = []
+  const mutationLock = {
+    async acquire(options = {}) {
+      waits.push(options.timeoutMs)
+      return async () => {}
+    },
+  }
+  const fixture = await makeFixture({ mutationLock })
+  try {
+    const deleteOne = async (sessionId, mode) => {
+      const preview = await call(fixture.api, '/preview', { body: { sessionIds: [sessionId], includeMemory: false, mode } })
+      const deleted = await call(fixture.api, '/delete', {
+        body: { sessionIds: [sessionId], includeMemory: false, mode, confirmToken: preview.body.preview.confirmation.token },
+      })
+      assert.equal(deleted.status, 200)
+      const trash = await call(fixture.api, '/trash', { method: 'GET' })
+      return trash.body.entries[0].trashId
+    }
+
+    // restore
+    const restoreId = await deleteOne(S1, 'soft')
+    waits.length = 0
+    const restore = await call(fixture.api, '/trash/restore', { body: { trashId: restoreId } })
+    assert.equal(restore.status, 200)
+    assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
+
+    // purge
+    const purgeId = await deleteOne(S2, 'hard')
+    waits.length = 0
+    const purge = await call(fixture.api, '/trash/purge', { body: { trashId: purgeId, confirmPhrase: 'DELETE' } })
+    assert.equal(purge.status, 200)
+    assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
+
+    // discard
+    //
+    // A soft entry deliberately keeps its log on disk (that is what makes it
+    // restorable), so `discard` — which is for entries that never committed —
+    // refuses it with E_TRASH_CONFLICT. Discarding a real deletion is not a
+    // thing the API offers, so seed the kind discard exists for: a manifest
+    // with no session/ and no memory/ directory.
+    const pendingId = `pending${Date.now().toString(36)}-e1`
+    const pendingDir = join(fixture.paths.trashDir, pendingId)
+    await mkdir(pendingDir, { recursive: true })
+    await writeFile(join(pendingDir, 'manifest.json'), JSON.stringify({
+      format: 1,
+      trashId: pendingId,
+      sessionId: S3,
+      title: 'never committed',
+      mode: 'hard',
+      includeMemory: false,
+      deletedAt: Date.now(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'pending',
+      sessionLog: null,
+      memory: { total: 0, adapters: [] },
+      catalog: {},
+      error: null,
+    }, null, 2), 'utf8')
+    waits.length = 0
+    const discard = await call(fixture.api, '/trash/discard', { body: { trashId: pendingId, confirmPhrase: 'DELETE' } })
+    assert.equal(discard.status, 200)
+    assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
   } finally {
     await fixture.home.cleanup()
   }

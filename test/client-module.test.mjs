@@ -666,3 +666,76 @@ test('client: the feedback dialog renders, and both locales carry its strings', 
   assert.equal(zh.__t('feedback.sent'), '反馈已发送，谢谢！')
   assert.equal(zh.__t('error.E_FEEDBACK_DISABLED'), '当前宿主未配置反馈通道。')
 })
+
+test('client: API calls stay document-relative so a path-prefixed deploy keeps its prefix', async () => {
+  // `dsh web --public-url https://host/ui/` mounts the whole app under a path
+  // prefix; DSH's own client stays document-relative for this reason. An
+  // absolute `/conversation-recycle-bin/api` dropped the prefix and 404'd every
+  // call. Keeping the same rule also covers the desktop shell's dsh-app://app.
+  const { exported } = await loadClient()
+  const originalFetch = globalThis.fetch
+  const urls = []
+  try {
+    globalThis.fetch = async (url) => {
+      urls.push(String(url))
+      return { ok: true, async json() { return { ok: true } } }
+    }
+
+    globalThis.document.baseURI = 'https://host.example/ui/'
+    await exported.__api('/state')
+    // A base without a trailing slash must not swallow the last segment.
+    globalThis.document.baseURI = 'https://host.example/ui/index.html'
+    await exported.__api('/trash')
+    globalThis.document.baseURI = 'dsh-app://app/'
+    await exported.__api('/audit?limit=5')
+
+    assert.deepEqual(urls, [
+      'https://host.example/ui/conversation-recycle-bin/api/state',
+      'https://host.example/ui/conversation-recycle-bin/api/trash',
+      'dsh-app://app/conversation-recycle-bin/api/audit?limit=5',
+    ])
+  } finally {
+    globalThis.fetch = originalFetch
+    globalThis.document.baseURI = 'http://127.0.0.1/'
+  }
+})
+
+test('client: recycle-bin write budget stays above the Host lock budget', async () => {
+  // Whichever side gives up first decides whether the user sees "failed" for
+  // work that did actually complete: the Host must be able to answer
+  // E_LOCK_BUSY, or a real result, before the browser aborts.
+  const { exported } = await loadClient()
+  const budgets = exported.__requestBudgets
+  assert.ok(budgets.trashMutation > 180_000, `trashMutation=${budgets.trashMutation} must exceed the Host 180s lock budget`)
+  assert.ok(budgets.trashMutation > budgets.request)
+  assert.ok(budgets.mutation >= budgets.request)
+})
+
+test('client: the foreign-writer wait is explained in both locales', async () => {
+  // A hard delete of a conversation used moments ago waits out
+  // `foreignWriterGraceMs` (~1.5s) re-checking for a second writer. The dialog
+  // must say so before the click and while the request runs, in both languages:
+  // a missing zh string would surface as the raw key.
+  const applyWithLocale = async (localeId) => {
+    const loaded = await loadClient()
+    loaded.exported.apply({
+      slots: {
+        inject(key, callback) { return callback() ?? (() => {}) },
+        register() { return () => {} },
+      },
+      effect(fn) { fn() },
+      get(name) {
+        if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+        return undefined
+      },
+    })
+    return loaded.exported
+  }
+  const en = await applyWithLocale('en')
+  assert.match(en.__t('dialog.hardGraceHint'), /1\.5s/)
+  assert.match(en.__t('dialog.stillWorking'), /confirming no other DSH instance/i)
+
+  const zh = await applyWithLocale('zh-CN')
+  assert.match(zh.__t('dialog.hardGraceHint'), /1\.5 秒/)
+  assert.match(zh.__t('dialog.stillWorking'), /其他 DSH 实例/)
+})

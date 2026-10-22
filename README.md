@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.2.2`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.3.5`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -74,7 +74,7 @@ memory  →  messages  →  session/catalog
 |---|---|---|
 | 会话列表「…」 | `sidebar.workspaces.session.menu.item`（order 500） | 点击后关闭菜单，打开全局确认框 |
 | 会话详情页头部 | `conversation.session.header.actions`（order 100） | 图标按钮打开同一确认框 |
-| 设置页 | `settings.section`（order 1300） | 「回收站 / 批量删除 / 审计留痕」三个标签页 |
+| 设置页 | `settings.section`（order 1300） | 「回收站 / 批量删除 / 审计留痕」三个标签页；按 tab 懒加载，刷新时保留旧数据 |
 | 全局确认框 | `shell.overlay` | 唯一删除发起处；挂在根级，不会随菜单卸载 |
 
 确认框内容：
@@ -111,7 +111,7 @@ memory  →  messages  →  session/catalog
 |---|---|
 | 误删 | 默认软删除；记忆复选框默认关；回收站；彻底删除一键但仍写回收站可恢复；批量软删除需输入数量 |
 | 批量误操作 | `maxBatchSessions`（实际上限还会被本分钟剩余额度收紧，避免"合法批量必然 429"）；批量需输入数量；每个会话独立事务 |
-| 暴力/脚本调用 | 同源校验（完整 authority：主机名+有效端口）+ `x-conversation-recycle-bin: 1` 私有 header + DSH `connection` 层（`requestRejection` + `connection/request` 瀑布流）+ 限流；默认仅接受 loopback 绑定，`allowNonLoopback=false` |
+| 暴力/脚本调用 | 同源校验（完整 authority：主机名+有效端口）+ `x-conversation-recycle-bin: 1` 私有 header + DSH `connection` 层（`requestRejection` + `connection/request` 瀑布流）+ 限流；默认仅接受 loopback 绑定；反代部署用 `allowedHosts` 精确放行（不要为此整体打开 `allowNonLoopback`） |
 | 两个 Host 并发写同一回收站 | mutation 串行 + `<dataDir>/mutation.lock` 跨进程文件锁，抢不到锁返回 `E_LOCK_BUSY`（而非写坏 manifest） |
 | 越权/越界 | 不在工作区登记的会话默认拒绝；可配置允许根目录白名单；受保护 id 列表；子代理会话默认拒绝 |
 | 活跃会话被写坏 | hard 模式对 live 会话先走 `quiesce`：取消当前轮次 → `archiveSession({stopActivity:true})` → 在 `liveDrainMs` 内等待 `running=false`，之后才移动日志；仍停不下来则整笔回滚并报 `E_POLICY_LIVE`。`stopLiveSessions:false` 可恢复为直接拒绝 |
@@ -119,6 +119,17 @@ memory  →  messages  →  session/catalog
 | 失败半删 | 每会话事务 + 逆序回滚；回滚失败进入错误详情和审计 |
 | 不可追溯 | `<DSH_HOME>/delete-conversation/audit.jsonl` 追加成功/失败/回滚/拒绝/恢复/清理记录；设置页可查看 |
 | 外部记忆存储损坏 | 灵枢适配器持有其 `_index.json.lock`，先写 restore bundle 再原子改写索引；任何一步失败先还原正文与索引；详情见 §5.3 |
+
+反代部署（`dsh web --public-url https://host/ui/`）时，代理会把外部主机名放进 `Host`，插件的回环校验会以 `E_FORBIDDEN_HOST` 拒绝。用 `allowedHosts` 精确放行，而不是把 `allowNonLoopback` 整体打开：
+
+| 配置 | 匹配 | 说明 |
+|---|---|---|
+| `allowedHosts: ["app.example"]` | 该主机的任意端口 | 端口在代理侧固定时更宽松 |
+| `allowedHosts: ["app.example:8443"]` | 仅该端口 | 推荐；端口不匹配仍拒绝 |
+| `allowedHosts: []`（默认） | 仅回环 | 与 0.3.4 行为一致 |
+
+条目必须是裸 authority（`host`、`host:port`、`[v6]:port`）；带 scheme、路径、userinfo 或通配符的条目会被丢弃并在 `/state` 的 warnings 里报告。**代理读超时仍需单独调整**：nginx `proxy_read_timeout` 默认 60s、Cloudflare 到源站默认 100s，而大批量删除的宿主预算是 `min(900s, 15s + 16s×批量 + drain)`，超时后代理会先断而宿主仍在执行。
+
 
 ### 4.3 回收站布局
 
@@ -190,7 +201,7 @@ dsh-conversation-recycle-bin/
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 131 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 138 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -199,7 +210,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（131 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（138 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -288,7 +299,7 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
 node test/feedback.test.mjs        # 19 个反馈用例
-npm test                           # 全量 131 个用例
+npm test                           # 全量 138 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'
