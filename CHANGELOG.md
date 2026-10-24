@@ -3,6 +3,25 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.6] — 2026-10-24
+
+对应 `AUDIT-2026-10-24-desktop-web-rc3.md` §7 的四条「建议动作」（A2 / A3 / A5 / A6）。同一节的 A1、A4、A7、A8 复核后判定为产品取舍（不申报未直接消费的 client 依赖、不导出 `Config` 以免设置页脱离非表单语义、归档读保留双源缓存、`missingSessionPaths` 保持成员判定），本版不改。
+
+### Fixed
+
+- **A3 `sessionController` 缺失时抛出的不是插件错误**：`lib/host/lifecycle.js` 新增 `peek()`，把 `ctx.get?.(name) ?? ctx[name]` 的整条退化读取留在 `try` 内。`??` 右侧的属性读会命中 cordis 的 Proxy trap（`cannot get property "sessionController" without inject`），异常类型不是 `DeleteError`，会绕过统一错误映射并让删除在归档前失败。现在 `sessionController` 明确视为可选服务：缺失时跳过 `cancel`，归档与 drain 检查照常执行。新增用例以抛异常的 getter 模拟裁剪组合，断言归档仍然发生。
+- **A6 运行中判定永远落到 `inspect()`**：`lib/host/gateway.js` 的 `probeRunning()` 改为主探 `agents.get(id)?.status === 'running'`（与宿主 `dsh-api-session-controller` 列表行的判据一致），旧的 `Session.running/active/busy` 字段探测降为兜底。删除前置的「是否运行中」现在真正走廉价的实时探测，不必为每次判定重读会话。
+- **A2 事件数列恒为 `—`**：`stat()` 从不返回 `eventCount`，旧代码读的正是这个不存在的字段。活跃会话改用 `Session.seq`（会话存储将其定义为日志长度，精确、纯数值读，不触发已废弃的 `snapshotEvents()`）；已落盘的非活跃会话没有便宜的精确来源，继续返回 `null`、由 UI 显示 `—`，不拿投影游标冒充精确值。新增两个用例（活跃 = 精确值、非活跃 = `null`），并把测试夹具的 `stat()` 改成 0.2.1 的真实形状（去掉 `eventCount`），避免此前的假绿。
+
+### Added
+
+- **A5 `engines.dsh`**：`package.json` 声明 `"dsh": ">=0.2.1-rc.2"`（本插件的实测下限）。该键在安装/声明时由版本闸门读取，运行时不强制；不设上界，因为更晚的版本尚未验证。
+
+### Maintenance
+
+- 测试 138 → **141**（api 41 → 44：活跃/非活跃事件数、无 `sessionController` 的裁剪组合、agents 三态运行判定）。
+- `lib/version.js` 与 `package.json` 同步到 0.3.6（`manifest` 用例守门）。
+
 ## [0.3.5] — 2026-10-22
 
 对应 `AUDIT-2026-10-22-desktop-web-compat.md`：把 0.3.4 之后一直只存在于工作树的修复正式发布，并落地该报告 §9 的全部建议。

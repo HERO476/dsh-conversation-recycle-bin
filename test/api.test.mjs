@@ -7,6 +7,7 @@ import { normalizeConfig } from '../lib/core/config.js'
 import { createFileLock } from '../lib/core/file-lock.js'
 import { createDeleteApi, ROUTE_PREFIX, TRASH_LOCK_BUDGET_MS } from '../lib/host/api.js'
 import { createSessionLogOps } from '../lib/host/catalog.js'
+import { createSessionGateway } from '../lib/host/gateway.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
 import { resolveDataPaths } from '../lib/host/paths.js'
 import { callRoute, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession } from './helpers.mjs'
@@ -81,11 +82,20 @@ async function makeFixture({
           error.code = 'not-found'
           throw error
         }
-        return { header: record.header, eventCount: record.eventCount, sizeBytes: record.sizeBytes }
+        // 0.2.1 (rc.2/rc.3) shape: `stat()` reports header/revision/sizeBytes and
+        // carries NO `eventCount`. The fixture mirrors that, so a regression that
+        // reads `snapshot.eventCount` fails here instead of only on a real Host.
+        return { header: record.header, revision: 'rev-1', sizeBytes: record.sizeBytes }
       },
     },
     sessionController: { list: async () => ({ items }) },
-    sessions: { get: (sessionId) => (liveSessionIds.includes(sessionId) ? { id: sessionId } : undefined) },
+    // A live entry exposes `seq`, which the session store defines as the log
+    // length (the exact event count).
+    sessions: {
+      get: (sessionId) => (liveSessionIds.includes(sessionId)
+        ? { id: sessionId, seq: seeded.get(sessionId)?.eventCount ?? 0 }
+        : undefined),
+    },
     // The `connection` service is probed, not injected: a fixture without it
     // keeps the route behind its own fence, exactly like a Host composition
     // that does not publish the service.
@@ -121,7 +131,10 @@ test('preview: counts messages + associated memory and issues a single-use token
     assert.equal(result.status, 200)
     assert.equal(result.body.ok, true)
     const preview = result.body.preview
-    assert.equal(preview.sessions[0].events, 12)
+    // Stored, non-live session: the Host exposes no cheap exact count, so the
+    // field is an honest `null` (the Client renders "—") instead of a number
+    // the Host never provided.
+    assert.equal(preview.sessions[0].events, null)
     assert.equal(preview.sessions[0].policy.ok, true)
     assert.equal(preview.memory.total, 2)
     assert.equal(preview.memory.adapters.find((adapter) => adapter.id === 'lingshu').available, true)
@@ -129,6 +142,57 @@ test('preview: counts messages + associated memory and issues a single-use token
     assert.equal(typeof preview.confirmation.token, 'string')
   } finally {
     await fixture.home.cleanup()
+  }
+})
+
+test('preview: a live session reports its exact event count from the session seq', async () => {
+  const fixture = await makeFixture({ sessionIds: [S1, S2], liveSessionIds: [S1] })
+  try {
+    const result = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: true, mode: 'soft' } })
+    assert.equal(result.status, 200)
+    assert.equal(result.body.preview.sessions[0].events, 12)
+    assert.equal(result.body.preview.sessions[0].live, true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('lifecycle: a composition without sessionController still archives instead of throwing a cordis error', async () => {
+  const archives = []
+  const registry = {
+    archiveSession: async (sessionId, options) => { archives.push([sessionId, options]) },
+    unarchiveSession: async () => {},
+  }
+  const ctx = { get: (name) => (name === 'workspaceRegistry' ? registry : undefined) }
+  // cordis' Proxy trap throws on a property read for a service this composition
+  // never provided; the old `?? ctx.sessionController` fallback re-raised it.
+  Object.defineProperty(ctx, 'sessionController', {
+    get() { throw new Error('cannot get property "sessionController" without inject') },
+  })
+  const ops = createLifecycleOps({ ctx, gateway: { isRunning: () => false }, config: { liveDrainMs: 0 } })
+  const undo = await ops.quiesce({ id: S1, live: true, running: true, archived: false })
+  assert.equal(typeof undo, 'function')
+  assert.deepEqual(archives, [[S1, { stopActivity: true }]])
+})
+
+test('gateway: the running probe reads the agent status', async () => {
+  const home = await makeTempHome()
+  try {
+    const agents = { get: (sessionId) => (sessionId === S1 ? { status: 'running' } : sessionId === S2 ? { status: 'idle' } : undefined) }
+    const sessions = { get: (sessionId) => (sessionId === S1 ? { id: sessionId, seq: 9 } : undefined) }
+    const gateway = createSessionGateway({
+      ctx: { get: (name) => ({ agents, sessions })[name] },
+      paths: resolveDataPaths(home.root),
+    })
+    assert.equal(gateway.isRunning(S1), true)
+    assert.equal(gateway.isRunning(S2), false)
+    // No agent entry at all means "not running" — the same answer the Host's own
+    // list rows give when `agents.get(id)` is undefined.
+    assert.equal(gateway.isRunning(S3), false)
+    const inspected = await gateway.inspect(S1)
+    assert.equal(inspected.events, 9)
+  } finally {
+    await home.cleanup()
   }
 })
 
