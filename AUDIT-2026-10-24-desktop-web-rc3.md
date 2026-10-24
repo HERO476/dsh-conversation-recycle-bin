@@ -256,7 +256,7 @@ GET /                                              → 401   text/plain（Host �
 - **A7**（归档/置顶双源读 + 1.5 s 缓存）：这是「uiapi 优先、registry 兜底」的兼容层，双读成本已由缓存吸收；单源化会依赖某一个服务在同一组合里必然存在——恰恰是本轮 A3 暴露的那类假设。
 - **A8**（`missingSessionPaths` 用成员判定而非 `existsSync` 计数）：成员判定是廉价的「日志缺失」上界，语义正确（多报会被后续 `stat()` 证伪），无需遍历。
 
-**仍未做（与本轮适配无关）**：npm publish（上一轮 §9 起就挂着）、`engines.dsh` 上界、`stat()` 缺 `eventCount` 时的 Host 侧补齐（属 DSH 产品改进建议，已记在 §7 A2）。
+**仍未做（与本轮适配无关）**：`engines.dsh` 上界、`stat()` 缺 `eventCount` 时的 Host 侧补齐（属 DSH 产品改进建议，已记在 §7 A2）。npm publish 已于 2026-10-24 完成：`dsh-conversation-recycle-bin@0.3.6`（`dist-tags.latest = 0.3.6`，tarball shasum `3f430c12e176321054b57254c6738354c727e3bb`，35 个文件 / 466.0 kB 解包），提交 `e99cac1` 与标签 `v0.3.6` 已推送到 `origin/main`。
 
 ---
 
