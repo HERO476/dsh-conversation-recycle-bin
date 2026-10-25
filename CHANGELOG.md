@@ -3,6 +3,12 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.7] — 2026-10-24
+
+### Fixed
+
+- **深色主题下主按钮文字不可见（「确认按钮消失」）**：`.dc-btn-primary` 用 `--dsw-alias-brand-primary` 作填充、却把文字写死成 `#fff`。该 token 是**会随主题反转的填充色**：浅色主题为 `neutral-bluish-1000`（rgb(15,17,21)，近黑），深色主题为 `neutral-bluish-50`（rgb(249,250,251)，近白）。于是深色主题下是「近白底 + 白字」，对比度约 1.04:1，删除成功对话框右下角只剩一个白块。改为填充用 `--dsw-alias-button-primary-fill`、文字用 `--dsw-alias-label-primary-inverted`（浅色 = 白、深色 = `neutral-bluish-800` rgb(53,54,56)），悬停改用 `--dsw-alias-button-primary-hover` 并去掉 `filter:brightness(.94)`。新增用例把这条配对钉住，防止再用字面色值。
+
 ## [0.3.6] — 2026-10-24
 
 对应 `AUDIT-2026-10-24-desktop-web-rc3.md` §7 的四条「建议动作」（A2 / A3 / A5 / A6）。同一节的 A1、A4、A7、A8 复核后判定为产品取舍（不申报未直接消费的 client 依赖、不导出 `Config` 以免设置页脱离非表单语义、归档读保留双源缓存、`missingSessionPaths` 保持成员判定），本版不改。

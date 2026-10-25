@@ -739,3 +739,33 @@ test('client: the foreign-writer wait is explained in both locales', async () =>
   assert.match(zh.__t('dialog.hardGraceHint'), /1\.5 秒/)
   assert.match(zh.__t('dialog.stillWorking'), /其他 DSH 实例/)
 })
+
+test('client: the primary button label follows the theme, not a hard-coded white', () => {
+  // `--dsw-alias-brand-primary` is a FILL whose value flips with the theme:
+  // near-black in light, near-white (#f9fafb) in dark. Hard-coding `#fff` as
+  // the label colour therefore erased the label in dark theme (contrast
+  // ~1.04:1) — the reported "确认按钮消失". The design system's counterpart for
+  // text on a primary fill is `--dsw-alias-label-primary-inverted`, so pin the
+  // pairing instead of the literal.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const rule = source.match(/\.dc-btn-primary\{[^}]*\}/)
+  assert.ok(rule, '.dc-btn-primary rule must exist')
+
+  const declarations = rule[0]
+  assert.match(
+    declarations,
+    /color:var\(--dsw-alias-label-primary-inverted,/,
+    '.dc-btn-primary must take its label colour from --dsw-alias-label-primary-inverted',
+  )
+  assert.doesNotMatch(
+    declarations,
+    /color:\s*#fff/i,
+    'a hard-coded white label disappears when brand-primary is near-white (dark theme)',
+  )
+  assert.match(
+    declarations,
+    /background:var\(--dsw-alias-button-primary-fill,/,
+    '.dc-btn-primary must fill from the theme button token so light and dark both resolve',
+  )
+})
+

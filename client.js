@@ -1984,8 +1984,14 @@ window.__ModuleLoader__.load({
 .dc-btn{height:30px;padding:0 12px;border-radius:7px;border:1px solid var(--dsw-alias-border-l2,#c9cdd4);background:var(--dsw-alias-bg-layer-1,#f7f8fa);color:var(--dsw-alias-label-primary,#1f2329);font:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 .dc-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2,#eff0f2)}
 .dc-btn:disabled{opacity:.5;cursor:not-allowed}
-.dc-btn-primary{background:var(--dsw-alias-brand-primary,#4d6bfe);border-color:var(--dsw-alias-brand-primary,#4d6bfe);color:#fff}
-.dc-btn-primary:hover:not(:disabled){filter:brightness(.94);background:var(--dsw-alias-brand-primary,#4d6bfe)}
+/* --dsw-alias-brand-primary is a FILL that flips with the theme: near-black
+   (#0f1115) in light, near-white (#f9fafb) in dark. Pairing it with a hard-coded
+   white label made the primary button's text invisible on dark (contrast
+   ~1.04:1) — that is the "确认按钮消失" report. The design system's counterpart
+   for text on a primary fill is --dsw-alias-label-primary-inverted: white in
+   light, neutral-800 (#353638) in dark. */
+.dc-btn-primary{background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4d6bfe));border-color:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary,#4d6bfe));color:var(--dsw-alias-label-primary-inverted,#fff)}
+.dc-btn-primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-brand-primary,#4d6bfe))}
 .dc-btn-danger{color:var(--dsw-alias-state-error-primary,#d93026);border-color:var(--dsw-alias-state-error-primary,#d93026);background:transparent}
 .dc-btn-danger:hover:not(:disabled){background:rgba(217,48,38,.08)}
 .dc-error{font-size:12px;line-height:1.55;padding:8px 10px;border-radius:8px;margin:8px 0;color:var(--dsw-alias-state-error-primary,#d93026);background:rgba(217,48,38,.08);border:1px solid rgba(217,48,38,.28)}
