@@ -261,3 +261,17 @@ GET /                                              → 401   text/plain（Host �
 ---
 
 *本报告由 Lead 汇总三路证据（Host 契约 / Client 契约 / 运行时实证）并做交叉校正。审计期间的临时脚本、抽取的 asar 副本与隔离环境均已清理。产品代码在报告交付时零改动；§11 记录的是用户随后要求「全部进行」而实施的 0.3.6 修复（`git status` 可见 `lib/host/{lifecycle,gateway}.js`、`lib/version.js`、`package.json`、`CHANGELOG.md`、`test/api.test.mjs` 与本报告）。*
+
+---
+
+## 12. 0.3.7 发布记录（深色主题主按钮文字不可见）
+
+**现象**：深色主题下，删除成功结果对话框右下角的「关闭」按钮渲染成一个没有文字的白块（用户报告「确认按钮消失」）。
+
+**根因**：`.dc-btn-primary` 用 `--dsw-alias-brand-primary` 作填充、文字写死 `#fff`。该 token 是**随主题反转的填充色**：`renderer/welcome.css` 里 `--dsw-alias-brand-primary: var(--dsw-alias-label-primary)`，`lib/welcome/welcome.css` 里浅色 = `neutral-bluish-1000`（#0f1115）、深色 = `neutral-bluish-50`（#f9fafb）。深色主题因此是「近白底 + 白字」，对比度约 **1.04:1**（AA 要求 4.5:1）。文案 `action.close` 中英文都在，不是缺字符串。
+
+**修复**：填充改 `--dsw-alias-button-primary-fill`、文字改 `--dsw-alias-label-primary-inverted`（浅色 #fff / 深色 #353638，对比度 18.9:1 与 11.8:1），悬停改 `--dsw-alias-button-primary-hover`（浅 #43454a / 深 #ebeef2）并去掉 `filter:brightness(.94)`。其余 `brand-primary` 用法是前景/描边语义，未改。新增用例把「文字必须取反转色、不得出现字面 #fff」钉住（client-module 22 → 23，全量 142）。
+
+**发布**：`dsh-conversation-recycle-bin@0.3.7`，`dist-tags.latest = 0.3.7`，tarball shasum `841baa8045cf366df77ab7cf2ef3f9b9a6d14dc7`（与本地 `npm pack --dry-run` 一致），35 个文件 / 467.4 kB 解包，`engines = {dsh: ">=0.2.1-rc.2", node: ">=20"}`。提交 `cdbc1f1`、标签 `v0.3.7` 已推送 `origin/main`。
+
+**生效条件**：client bundle 在 Host 启动时组合并常驻内存（`dsh-client-modules` 的 `record.bundle`，仅由 `rebuilt()` 刷新；桌面 profile 无文件监听插件），**必须重启桌面端**，刷新页面不够。
