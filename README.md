@@ -101,6 +101,8 @@ memory  →  messages  →  session/catalog
    - 先对**全部**会话做策略预检，任一被拒绝则整批不执行（不会半成功）；
    - 逐会话执行 `quiesce(live) → memory → messages → session/catalog` 事务；
    - 所有 mutation（delete/restore/purge/discard）串行经过进程内链 + `<dataDir>/mutation.lock` 跨进程文件锁：桌面端与 `dsh web` 共享一个 `DSH_HOME` 时，第二个实例的并发删除会拿到 `E_LOCK_BUSY` 而不是写坏同一份 manifest；
+   - 队列与锁都有预算，不会无限等待：排队超过 `lockTimeoutMs + 60s` 抛 `E_QUEUE_TIMEOUT`（503，**未执行任何动作**，可安全重试）；客户端在排队或取锁期间断开（关标签页/刷新）抛 `E_ABANDONED`（409，同样未执行）。两者都表示"什么都没发生"，与 `E_TRANSACTION_FAILED`（可能已部分执行）区分开；
+   - 锁文件 stale 判定：pid 可证明已死才立即破锁；无 owner 的锁只按 age 破；**持有者活着时绝不按 age 破**（否则长 GC 会放进第二个写者）。连续 3 次删不掉 stale 锁即 `E_LOCK_BUSY`，不空转；
    - 返回 `{ok: true, partial, results, failures}`：`ok` 表示计划已执行，`partial` 表示有会话失败；只有**全部**失败时才抛首个错误（HTTP 状态来自 `ERROR_STATUS`，错误码保留真实策略码）。
 3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging））、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志的条目应走「恢复」而不是 discard）。未完成条目若还留着会话日志，设置页会给出「恢复」按钮，可以直接把它恢复回会话列表。
 4. `GET /audit?limit=N`。
@@ -119,6 +121,7 @@ memory  →  messages  →  session/catalog
 | 失败半删 | 每会话事务 + 逆序回滚；回滚失败进入错误详情和审计 |
 | 不可追溯 | `<DSH_HOME>/delete-conversation/audit.jsonl` 追加成功/失败/回滚/拒绝/恢复/清理记录；设置页可查看 |
 | 外部记忆存储损坏 | 灵枢适配器持有其 `_index.json.lock`，先写 restore bundle 再原子改写索引；任何一步失败先还原正文与索引；详情见 §5.3 |
+| 组合里没有 `connection` 服务 | 默认 **`requireConnection: true`**：探测不到 `connection.requestRejection` 时所有路由返回 401 `E_UNAUTHORIZED`，因为本路由自己的 loopback/Origin 栅栏**分不清本机上的两个进程**（任何本机进程都能伪造 `Host: 127.0.0.1` 与私有 header）。确实要跑无 `connection` 的裁剪组合时才设 `requireConnection: false`，并自行承担"本机任意进程可调用删除接口"的风险 |
 
 反代部署（`dsh web --public-url https://host/ui/`）时，代理会把外部主机名放进 `Host`，插件的回环校验会以 `E_FORBIDDEN_HOST` 拒绝。用 `allowedHosts` 精确放行，而不是把 `allowNonLoopback` 整体打开：
 

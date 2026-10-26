@@ -413,7 +413,11 @@ test('route: /state advertises the channel and POST /feedback delivers it', asyn
     const logs = []
     const api = createDeleteApi({
       ctx: { get: () => undefined },
-      config: normalizeConfig({}).value,
+      // This fixture deliberately has no `connection` service, so it opts out
+      // of the (default-on) requirement; the refusal itself is covered by
+      // "route: a composition without a connection service is refused by
+      // default" below.
+      config: normalizeConfig({ requireConnection: false }).value,
       paths: resolveDataPaths(home.root),
       logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
     })
@@ -467,7 +471,7 @@ test('route: a Host without mail settings answers E_FEEDBACK_DISABLED, not a cra
   try {
     const api = createDeleteApi({
       ctx: { get: () => undefined },
-      config: normalizeConfig({}).value,
+      config: normalizeConfig({ requireConnection: false }).value,
       paths: resolveDataPaths(home.root),
       logger: { error() {}, warn() {}, info() {} },
     })
@@ -485,6 +489,29 @@ test('route: a Host without mail settings answers E_FEEDBACK_DISABLED, not a cra
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+    await home.cleanup()
+  }
+})
+
+test('route: a composition without a connection service is refused by default', async () => {
+  const home = await makeTempHome()
+  try {
+    const logs = []
+    const api = createDeleteApi({
+      ctx: { get: () => undefined },
+      config: normalizeConfig({}).value,
+      paths: resolveDataPaths(home.root),
+      logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
+    })
+    const result = await callRoute(api.handler, {
+      method: 'GET',
+      path: `${ROUTE_PREFIX}/state`,
+      headers: HEADERS,
+    })
+    assert.equal(result.status, 401)
+    assert.equal(result.body.error.code, 'E_UNAUTHORIZED')
+    assert.match(logs.join('\n'), /requireConnection/)
+  } finally {
     await home.cleanup()
   }
 })

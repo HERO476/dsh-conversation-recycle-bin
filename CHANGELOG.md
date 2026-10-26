@@ -3,6 +3,39 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.8] — 2026-10-26
+
+技术方案评审团（架构 / 安全 / 验收三方）对 0.3.7 的复核结论是 15 条问题、142 条测试全绿但 **NEEDS WORK**。本版把它们全部修掉，测试 142 → **152**。
+
+### Fixed — 数据安全
+
+- **ARCH-1 删除崩溃后记忆永久孤儿**：`lib/core/cascade.js` 的记忆步骤只改内存里的 `entry.memory`，从不落盘。若在"记忆已导出"与"manifest 写入 `status: 'trashed'`"之间崩溃，条目会停在 `pending` 且 `memory.total = 0`，而真实 bundle 只存在于 `<trashId>/memory/<adapter>/bundle.json`；此后 restore（"nothing left to restore"）、discard（"still holds memory files"）、purge（"cannot be purged"）三条路全部拒绝，用户没有任何出口。现在导出后立即 `trash.update(entry.trashId, { memory: bundle })`（失败先 `memory.restoreEntry(bundle)` 补偿再抛）；恢复路径在 `includeMemory` 为真但 manifest 说没有记忆时，用新增的 `memory.readExported()` 从磁盘重建摘要。
+- **ARCH-1 次生风险**：恢复成功后原本无条件 `trash.remove()`，记忆未回灌时会删掉唯一副本。现在只有 `memory/` 目录确实为空（`ops.hasFiles` 探测，异常按"仍有文件"处理）才删条目，返回值新增 `memoryLeftOnDisk`。
+- **R-02 缺 `sessions` 服务时硬删运行中会话**：`lib/host/gateway.js` 的 `isLive()` 原先只看 `sessions`，而宿主的运行判定看 `agents`。现在两个信号任一为真即视为 live，不再跳过 quiesce。
+- **ARCH-3 运行态未知被当成"没在跑"**：`lib/host/lifecycle.js` 的 `inspectRunning()` 现在对"探针与 inspect 都给不出布尔值"的情形 fail-closed 返回 `true`，由 `liveDrainMs` 的 deadline 兜底并回滚归档。
+
+### Fixed — 可用性
+
+- **ARCH-2 / R-01 请求永久挂起（P0）**：两层都有问题，一并修。
+  - 跨进程锁 `lib/core/file-lock.js`：stale 分支删不掉锁文件时**无 sleep、无 deadline**，实测 3 秒内自旋 3235 次、永不返回。现在每轮都 `sleep`、循环顶部检查预算，连续 3 次删不掉即抛 `E_LOCK_BUSY`；stale 判定改为"pid 可证明已死 → 立即破锁 / 无 owner 只按 age / **持有者活着绝不按 age 破**"（长 GC 不再放第二个写者进来）。
+  - 进程内队列 `lib/host/api.js` 的 `serialize()`：`mutationChain.then` 没有任何预算，客户端中止后 Host 照样执行。现在队列预算 = `lockTimeoutMs + 60s` 宽限，超时抛新增的 `E_QUEUE_TIMEOUT`(503)；并在"开跑前"与"拿到跨进程锁后"各查一次客户端是否已断开（`clientGone()`），断开则抛新增的 `E_ABANDONED`(409)，绝不落盘。
+- **R-07 软删静默掐断当前回合**：软删同样 `archiveSession(id, { stopActivity: true })`，会中断正在跑的回合。`lib/core/policy.js` 现在对 `mode === 'soft' && live` 给出明确 warning，预览页在点击前就会显示。
+- **R-03 恢复后把"已归档"变成"可见"**：`inspect()` 原先 `archived: fromList?.archived ?? false`，而 `controller.list()` 不保证携带归档态。现在以 `workspaceRegistry` 为权威（`state.archived.has(id) || fromList?.archived === true`，pinned 同理），恢复才真正"回到删除前的状态"。
+- **ARCH-5 能力判定口径分裂**：新增 `entryCapabilities(entry, disk)` 统一 restore/purge/discard 的判定，`serializeEntry()` 额外输出 `capabilities`，避免再出现"UI 给按钮、三个接口全拒"的死胡同。
+
+### Fixed — 安全加固
+
+- **S1 鉴权层异常时 fail-open**：`connection.requestRejection()` 抛错原先被 `catch { rejection = undefined }` 吞掉并放行。现在记 `logger.error` 并返回 503 `E_INTERNAL`；任何非 `undefined/null` 的拒绝值一律拒绝（`401`→401、`403`→403、其它→503）。
+- **S5 无 connection 服务时本机任意进程可删**：新增 `config.requireConnection`（**默认 `true`**）。组合里没有 `connection` 服务时，所有路由返回 401 `E_UNAUTHORIZED` 并提示如何显式降级；`config.schema.json` 已同步。
+- **S2 非法回收站 id 变成目录存在性探测**：`discard` 入口先过 `isTrashId()`，`trash.entryDir()` 也改抛 `DeleteError('E_BAD_REQUEST')` 而不是普通 `Error`（原先逃逸成 500，且与 404 可区分）。
+- **S3 manifest 可指向任意路径**：恢复前校验 `sessionLog.from` 必须在 `sessionsRoot` 内、`sessionLog.to` 必须在回收站目录内，否则 `E_TRASH_CONFLICT`。
+- **S4 彻底删除后标题仍留在审计里**：purge / discard 的审计记录不再写 `title`；`/trash/audit` 的返回统一过 `redactDetails()`，绝对路径不上线。
+
+### Maintenance
+
+- 测试 142 → **152**：新增"stale 锁删不掉必须报错而不是自旋"、"非法 id 必须 400"、"鉴权层抛错必须 503"、"客户端已断开不得执行"、"记忆 bundle 必须落盘"、"pending 条目可从磁盘恢复"、"manifest 越界必须拒绝"、"purge 审计不含标题"、"软删运行中会话必须有 warning"、"无 connection 服务默认被拒"。
+- `lib/version.js` 与 `package.json` 同步到 0.3.8。
+
 ## [0.3.7] — 2026-10-24
 
 ### Fixed

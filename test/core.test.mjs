@@ -105,6 +105,19 @@ test('policy: refuses protected, orphan, subagent, strict-live and out-of-root s
   assert.equal(evaluateSessionPolicy({ session: base, workspace, live: false, mode: 'soft', config: rooted }).error.code, 'E_POLICY_ROOT')
 })
 
+test('policy: a soft delete of a running conversation warns that it stops the turn', () => {
+  const config = normalizeConfig({}).value
+  const base = { id: 'session-a', title: 'A', cwd: 'D:\\Work', blank: false }
+  const workspace = { id: 'ws', path: 'D:\\Work' }
+  // Soft delete archives with `stopActivity: true`, so it interrupts a running
+  // turn exactly like a hard delete; the user must be told before the click.
+  const soft = evaluateSessionPolicy({ session: base, workspace, live: true, mode: 'soft', config })
+  assert.equal(soft.ok, true)
+  assert.equal(soft.warnings.some((warning) => /running right now/.test(warning)), true)
+  const idle = evaluateSessionPolicy({ session: base, workspace, live: false, mode: 'soft', config })
+  assert.equal(idle.warnings.some((warning) => /running right now/.test(warning)), false)
+})
+
 test('policy: orphan deletion can be opted into and reports a warning', () => {
   const config = normalizeConfig({ allowOrphanSessions: true }).value
   const result = evaluateSessionPolicy({

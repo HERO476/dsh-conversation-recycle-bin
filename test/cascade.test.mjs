@@ -353,3 +353,80 @@ test('purge: a live soft entry is quiesced before its log is removed', async () 
   assert.deepEqual(calls.map((call) => call[0]), ['inspect', 'quiesce', 'messages', 'catalog-capture', 'session'])
   assert.equal(trash.entries.has(entry.trashId), false)
 })
+
+/* ------------------------------------------------------------------ *
+ * 0.3.8 regressions
+ * ------------------------------------------------------------------ */
+
+test('delete: the exported memory bundle is committed to the manifest, not only held in memory', async () => {
+  const { ops } = makeOps()
+  const trash = makeTrash()
+  const outcome = await performSessionDelete({
+    session, mode: 'hard', includeMemory: true, ops, trash, audit: makeAudit(), config, now: () => 1_000,
+  })
+  // The manifest is the recovery contract: a crash right after the export used
+  // to leave `total: 0` on disk while the bundle sat in `memory/<adapter>/`.
+  const stored = trash.entries.get(outcome.entry.trashId)
+  assert.equal(stored.memory.total, 2)
+  assert.equal(stored.memory.adapters[0].id, 'lingshu')
+})
+
+test('restore: a pending entry whose bundle is only on disk is recovered instead of being refused', async () => {
+  const { ops, calls } = makeOps()
+  ops.memory.readExported = async () => ({
+    adapters: [{ id: 'lingshu', label: '灵枢', count: 2, bundlePath: '/trash/t9-crash/memory/lingshu/bundle.json' }],
+    total: 2,
+    protected: 0,
+  })
+  ops.hasFiles = async () => false
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't9-crash', sessionId: session.id, title: 'T', mode: 'soft', includeMemory: true,
+    // The crash window: `includeMemory` was requested and the bundle exists, but
+    // the manifest still says nothing was exported.
+    status: 'pending', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await performRestore({ entry, ops, trash, audit: makeAudit(), now: () => 4_000 })
+  assert.deepEqual(calls.map((call) => call[0]), ['memory-restore'])
+  assert.equal(calls[0][1], 2)
+  assert.equal(trash.entries.has(entry.trashId), false)
+})
+
+test('restore: a manifest pointing outside the sessions root is refused before any move', async () => {
+  const { ops, calls } = makeOps()
+  ops.pathExists = async () => true
+  ops.isInsideSessionsRoot = (target) => target === '/sessions/session'
+  ops.isInsideTrashDir = (target) => target === '/trash/session'
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't10-evil', sessionId: session.id, title: 'T', mode: 'hard', includeMemory: false,
+    status: 'trashed',
+    sessionLog: { sessionId: session.id, from: 'C:\Windows\System32', to: '/trash/session' },
+    catalog: { sessionId: session.id, workspaceId: 'ws-1' },
+    memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await assert.rejects(performRestore({ entry, ops, trash, audit: makeAudit() }), (error) => {
+    assert.equal(error.code, 'E_TRASH_CONFLICT')
+    assert.match(error.message, /outside its own storage/)
+    return true
+  })
+  assert.deepEqual(calls, [])
+})
+
+test('purge: the audit record no longer repeats the deleted conversation title', async () => {
+  const { ops } = makeOps({ inspect: async () => null })
+  const trash = makeTrash()
+  const audit = makeAudit()
+  const entry = {
+    format: 1, trashId: 't11-title', sessionId: session.id, title: 'QQ私聊 2747277822', mode: 'soft',
+    includeMemory: false, status: 'trashed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await performPurge({ entry, ops, trash, audit })
+  assert.equal(audit.records.length, 1)
+  // The conversation is gone; its title must not survive in the audit trail.
+  assert.equal('title' in audit.records[0], false)
+  assert.equal(audit.records[0].sessionId, session.id)
+})

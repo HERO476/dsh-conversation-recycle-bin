@@ -8,6 +8,7 @@
   "properties": {
     "enabled": { "type": "boolean", "default": true, "description": "Master switch. When false the route answers 503 and the UI hides its entries." },
     "requireSameOrigin": { "type": "boolean", "default": true, "description": "Reject requests whose Origin does not match the request's full authority (hostname AND effective port; a missing port defaults by the Origin's own scheme). The desktop shell source dsh-app://app is trusted, matching DSH's own fence." },
+    "requireConnection": { "type": "boolean", "default": true, "description": "Refuse requests when the Host exposes no `connection` service. The loopback/origin fence cannot tell two local processes apart, so without a connection layer any process on this machine could delete a conversation. Set false only for a trusted composition that has no connection service." },
     "allowNonLoopback": { "type": "boolean", "default": false, "description": "Allow requests from any authority, not just loopback. Prefer allowedHosts when a reverse proxy presents a known hostname." },
     "allowedHosts": {
       "type": "array", "items": { "type": "string" }, "maxItems": 32, "default": [],

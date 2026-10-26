@@ -10,7 +10,7 @@ import { createSessionLogOps } from '../lib/host/catalog.js'
 import { createSessionGateway } from '../lib/host/gateway.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
 import { resolveDataPaths } from '../lib/host/paths.js'
-import { callRoute, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession } from './helpers.mjs'
+import { callRoute, makeHttpPair, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession } from './helpers.mjs'
 
 const S1 = 'session-aaaaaaaa-1111'
 const S2 = 'session-bbbbbbbb-2222'
@@ -101,7 +101,14 @@ async function makeFixture({
     // that does not publish the service.
     ...(connection === null ? {} : { connection }),
   }
-  const config = normalizeConfig(configOverrides).value
+  const config = normalizeConfig({
+    // Every fixture below deliberately omits the `connection` service, so it
+    // has to opt out of the (default-on) requirement. The refusal path itself
+    // is covered by `connection: a Host without a connection service refuses
+    // by default`.
+    requireConnection: connection !== null,
+    ...configOverrides,
+  }).value
   const paths = resolveDataPaths(home.root)
   const logs = []
   const api = createDeleteApi({
@@ -1234,6 +1241,104 @@ test('trash mutations ask the file lock for the long batch budget, not the gener
     const discard = await call(fixture.api, '/trash/discard', { body: { trashId: pendingId, confirmPhrase: 'DELETE' } })
     assert.equal(discard.status, 200)
     assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+/* ------------------------------------------------------------------ *
+ * 0.3.8 regressions
+ * ------------------------------------------------------------------ */
+
+test('mutation lock: a stale lock that cannot be removed ends in E_LOCK_BUSY, not an endless spin', async () => {
+  const dir = join(process.cwd(), 'test', '.tmp')
+  await mkdir(dir, { recursive: true })
+  const lockPath = join(dir, `stale-stuck-${randomBytes(6).toString('hex')}.lock`)
+  await writeFile(lockPath, `${JSON.stringify({ pid: 999_999, nonce: 'dead', at: 0 })}\n`, 'utf8')
+  // A provably dead owner makes the lock stale; the failing `rm` is the Windows
+  // case (a handle the lock cannot see holds the file). Before 0.3.8 this loop
+  // had no sleep and no deadline, so it never returned.
+  const realRm = rm
+  const lock = createFileLock({
+    lockPath,
+    timeoutMs: 300,
+    staleMs: 1,
+    retryMs: 5,
+    isProcessAlive: () => false,
+    fsApi: {
+      open: (await import('node:fs/promises')).open,
+      stat: (await import('node:fs/promises')).stat,
+      readFile: (await import('node:fs/promises')).readFile,
+      utimes: (await import('node:fs/promises')).utimes,
+      rm: async () => {
+        const error = new Error('EPERM: operation not permitted')
+        error.code = 'EPERM'
+        throw error
+      },
+    },
+  })
+  const started = Date.now()
+  await assert.rejects(() => lock.acquire(), (error) => error.code === 'E_LOCK_BUSY')
+  // Bounded by the budget, not by luck.
+  assert.ok(Date.now() - started < 5_000)
+  await realRm(lockPath, { force: true })
+})
+
+test('trash: a malformed id is a 400 before any path is built', async () => {
+  const fixture = await makeFixture()
+  try {
+    for (const trashId of ['../../etc', 'a/b', '', 'x'.repeat(200), 'not a valid id']) {
+      const result = await call(fixture.api, '/trash/discard', { body: { trashId, phrase: '' } })
+      assert.equal(result.status, 400, `expected 400 for ${JSON.stringify(trashId)}`)
+      assert.equal(result.body.error.code, 'E_BAD_REQUEST')
+    }
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('connection: a throwing connection layer fails closed with 503', async () => {
+  const fixture = await makeFixture({
+    connection: {
+      requestRejection() {
+        throw new Error('auth store unavailable')
+      },
+    },
+  })
+  try {
+    const result = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(result.status, 503)
+    assert.equal(result.body.error.code, 'E_INTERNAL')
+    // The transaction never started.
+    assert.equal(await pathExists(fixture.seeded.get(S1).dir), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('queue: a request whose client is already gone is not applied', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const pair = makeHttpPair({
+      path: `${ROUTE_PREFIX}/delete`,
+      headers: HEADERS,
+      body: {
+        sessionIds: [S1],
+        includeMemory: false,
+        mode: 'soft',
+        confirmToken: preview.body.preview.confirmation.token,
+      },
+    })
+    // The tab closed while the request was queued.
+    pair.response.destroyed = true
+    fixture.api.handler(pair.request, pair.response)
+    await pair.done
+    assert.equal(pair.response.statusCode, 409)
+    assert.equal(JSON.parse(pair.response.body).error.code, 'E_ABANDONED')
+    // The transaction never ran: the log is still in place and nothing moved.
+    assert.equal(await pathExists(fixture.seeded.get(S1).dir), true)
+    assert.equal(fixture.workspaceRegistry.globalState.archived.has(S1), false)
   } finally {
     await fixture.home.cleanup()
   }
