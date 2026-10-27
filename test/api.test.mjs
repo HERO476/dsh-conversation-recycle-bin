@@ -1316,6 +1316,40 @@ test('connection: a throwing connection layer fails closed with 503', async () =
   }
 })
 
+test('queue: a fully read body is not a disconnect', async () => {
+  // Regression for 0.3.8: Node auto-destroys the readable side of an
+  // IncomingMessage once the body has been consumed, so `req.destroyed` is true
+  // on every healthy POST. Treating it as "client gone" rejected every
+  // deletion with E_ABANDONED. The socket, not the request stream, is the
+  // signal that survives a normal request.
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const pair = makeHttpPair({
+      path: `${ROUTE_PREFIX}/delete`,
+      headers: HEADERS,
+      body: {
+        sessionIds: [S1],
+        includeMemory: false,
+        mode: 'soft',
+        confirmToken: preview.body.preview.confirmation.token,
+      },
+    })
+    pair.request.destroyed = true
+    pair.request.readableEnded = true
+    pair.request.complete = true
+    fixture.api.handler(pair.request, pair.response)
+    await pair.done
+    assert.equal(pair.response.statusCode, 200, pair.response.body)
+    assert.equal(JSON.parse(pair.response.body).ok, true)
+    // The deletion actually ran: the conversation is now in the recycle bin.
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
 test('queue: a request whose client is already gone is not applied', async () => {
   const fixture = await makeFixture()
   try {

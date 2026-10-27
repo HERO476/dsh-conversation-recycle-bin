@@ -3,6 +3,20 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.9] — 2026-10-27
+
+0.3.8 的紧急修复：**所有删除都会被拒绝**，返回 `409 E_ABANDONED`（"The client disconnected before this request ran; nothing was changed."）。0.3.8 发布后不到一天即被用户在使用中撞到。
+
+### Fixed
+
+- **`clientGone()` 把每一个正常请求都当成"客户端已断开"**：0.3.8 为了修 R-01（客户端中止后 Host 照样执行），在 `lib/host/api.js` 里加了断连检测，其中一条是 `req.destroyed === true`。但 Node 的 `IncomingMessage` 在请求体被读完后就自动 destroy 可读侧，所以**任何一次正常 POST 在读完 body 之后 `req.destroyed` 都是 `true`**（Node 24 实测：`{req.destroyed:true, req.aborted:false, req.complete:true, res.destroyed:false, res.socket.destroyed:false}`）。结果是删除、恢复、彻底删除、丢弃四条路由全部在开跑前被判为"客户端已断开"。
+  现在只用**能在正常请求中存活**的信号：`res.destroyed`、`res.writableEnded`、`res.socket`/`req.socket` 的 `destroyed`。`req.destroyed` 与已废弃的 `req.aborted` 不再参与判定，代码注释里记了实测值，避免以后有人再加回去。
+- 新增回归用例 **"queue: a fully read body is not a disconnect"**：构造一个 `req.destroyed/readableEnded/complete` 全为 `true` 的请求，断言删除仍然成功、会话确实进了回收站。0.3.8 的写法会让这条用例失败。
+
+### Maintenance
+
+- 测试 152 → **153**；`lib/version.js` 与 `package.json` 同步到 0.3.9。
+
 ## [0.3.8] — 2026-10-26
 
 技术方案评审团（架构 / 安全 / 验收三方）对 0.3.7 的复核结论是 15 条问题、142 条测试全绿但 **NEEDS WORK**。本版把它们全部修掉，测试 142 → **152**。
