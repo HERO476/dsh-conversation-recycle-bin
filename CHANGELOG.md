@@ -3,6 +3,25 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.10] — 2026-10-27
+
+回收站「30 天后自动清理」。这一版把一个**从 0.3.0 起就写在配置里、但从来没人读**的旋钮（`trashRetentionDays`）真正接上了逻辑。
+
+### Added
+
+- **`lib/core/retention.js`**：纯函数选期 —— `selectExpired(entries, { retentionDays, now, limit })` 只挑 `status: 'trashed'`、`deletedAt` 可解析且早于窗口的条目，最旧优先；`daysUntilExpiry()` 供 UI 显示剩余天数。任何"说不准"的输入（`retentionDays <= 0`、`deletedAt` 缺失/非法、`trashId` 为空、`now` 非有限值）一律**不清**，宁可留着让人自己删。
+- **Host 侧清扫**：`lib/host/api.js` 新增 `sweepExpiredTrash({ force })`，`trashList()` 每次先扫（5 分钟节流）；`lib/index.js` 另加 6 小时定时（启动后 60 秒先扫一次，`unref` 不影响退出）。清扫走与「永久清除」**完全相同**的 `performPurge`，并且在跨进程 mutation 锁内**重新读 manifest、复判 `entryCapabilities().canPurge`**（scan 发生在锁外，期间条目可能已被恢复），单次最多 20 条，单条失败不中断整轮。
+- **UI**：回收站面板顶部写明"条目在删除 N 天后自动清理"（`trashRetentionDays: 0` 时不显示），每行显示"N 天后自动清理"。
+- 审计：自动清理的记录与手动彻底删除同形，额外带 `source: 'retention'`，可与用户操作区分。
+
+### Changed
+
+- `config.schema.json` 里 `trashRetentionDays` 的说明改为实际行为（每 6 小时 + 每次列表时检查，0 = 关闭）。
+
+### Tests
+
+- 新增 `test/retention.test.mjs`（8 条纯函数用例），`test/api.test.mjs` 追加 3 条集成用例（过期条目被下一次列表清掉、`0` 关闭清扫、从未提交的残留条目永不清扫）。测试 153 → **164**。
+
 ## [0.3.9] — 2026-10-27
 
 0.3.8 的紧急修复：**所有删除都会被拒绝**，返回 `409 E_ABANDONED`（"The client disconnected before this request ran; nothing was changed."）。0.3.8 发布后不到一天即被用户在使用中撞到。

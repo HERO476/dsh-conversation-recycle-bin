@@ -28,7 +28,7 @@
       "description": "When non-empty, a session may only be deleted when its workspace path is inside one of these roots."
     },
     "defaultMode": { "enum": ["soft", "hard"], "default": "soft", "description": "Initial mode selected in the confirmation dialog." },
-    "trashRetentionDays": { "type": "number", "minimum": 0, "maximum": 3650, "default": 30, "description": "Informational retention shown in the recycle bin; purging is always explicit." },
+    "trashRetentionDays": { "type": "number", "minimum": 0, "maximum": 3650, "default": 30, "description": "Days a committed recycle-bin entry is kept before the Host purges it automatically (checked every six hours and whenever /trash is listed). 0 disables the sweep, leaving entries until the user purges them." },
     "maxBatchSessions": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 50, "description": "Upper bound on one batch. The effective limit is min(this, remaining deletions in the current minute), so a batch can never exceed the rate budget." },
     "maxDeletesPerMinute": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 20, "description": "Sliding-window limit for conversation deletions (single and batch items count individually)." },
     "confirmTokenTtlMs": { "type": "integer", "minimum": 5000, "maximum": 3600000, "default": 120000 },

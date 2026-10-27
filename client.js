@@ -112,6 +112,8 @@ window.__ModuleLoader__.load({
         'trash.title': 'Recycle bin',
         'trash.empty': 'The recycle bin is empty.',
         'trash.deletedAt': 'Deleted {time}',
+        'trash.retention': 'Entries are purged automatically {days} days after deletion. Set trashRetentionDays to 0 to keep them until you purge them yourself.',
+        'trash.expiresIn': 'auto-purged in {days} d',
         'trash.modeSoft': 'soft',
         'trash.modeHard': 'permanent',
         'trash.items': '{sessions} conversation(s) · {memories} memory entries',
@@ -268,6 +270,8 @@ window.__ModuleLoader__.load({
         'trash.title': '回收站',
         'trash.empty': '回收站为空。',
         'trash.deletedAt': '删除于 {time}',
+        'trash.retention': '条目在删除 {days} 天后自动清理。把 trashRetentionDays 设为 0 可改为一直保留、由你自己彻底删除。',
+        'trash.expiresIn': '{days} 天后自动清理',
         'trash.modeSoft': '软删除',
         'trash.modeHard': '彻底',
         'trash.items': '{sessions} 个对话 · {memories} 条记忆',
@@ -1804,6 +1808,15 @@ window.__ModuleLoader__.load({
         ? state.limits.effectiveBatch
         : (state?.limits?.maxBatchSessions ?? 0)
       const overLimit = effectiveBatch > 0 && selectedIds.length > effectiveBatch
+      // The Host purges entries on its own after `trashRetentionDays`; the row
+      // hint has to be computed from the same number or it would promise a
+      // window the Host does not keep.
+      const retentionDays = Number(state?.trashRetentionDays) > 0 ? Number(state.trashRetentionDays) : 0
+      const daysLeft = (entry) => {
+        if (retentionDays <= 0 || !Number.isFinite(entry?.deletedAt) || entry.deletedAt <= 0) return null
+        const left = entry.deletedAt + retentionDays * 86_400_000 - Date.now()
+        return left <= 0 ? 0 : Math.ceil(left / 86_400_000)
+      }
 
       const openFeedback = () => dialogStore.open({
         kind: 'feedback',
@@ -1868,12 +1881,13 @@ window.__ModuleLoader__.load({
           : null,
 
         tab === 'trash' ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
+          retentionDays > 0 ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.retention', { days: retentionDays })) : null,
           trash.length === 0 ? h('div', { className: 'dc-empty' }, t('trash.empty')) : null,
           ...trash.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
               h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId),
               h('div', { className: 'dc-hint' },
-                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
+                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${daysLeft(entry) === null ? '' : ` · ${t('trash.expiresIn', { days: daysLeft(entry) })}`}`)),
             h('div', { className: 'dc-row-actions' },
               h(Button, { onClick: () => { void restore(entry.trashId) } }, t('action.restore')),
               purgeTarget === entry.trashId

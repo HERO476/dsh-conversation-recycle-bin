@@ -1377,3 +1377,94 @@ test('queue: a request whose client is already gone is not applied', async () =>
     await fixture.home.cleanup()
   }
 })
+
+test('retention: an entry older than trashRetentionDays is purged by the next listing', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    const deleted = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(deleted.status, 200)
+
+    const listed = await fixture.api.__test.trashList()
+    assert.equal(listed.entries.length, 1)
+    const trashId = listed.entries[0].trashId
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), true)
+
+    // Age the manifest past the 30-day window, then let the listing sweep it.
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.deepEqual(swept.purged, [trashId])
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
+
+    const after = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(after.body.entries.length, 0)
+    // The session stays deleted: retention purges the bundle, it never restores.
+    assert.equal(await pathExists(fixture.seeded.get(S2).dir), false)
+
+    const audit = await call(fixture.api, '/audit?limit=20', { method: 'GET' })
+    const record = audit.body.records.find((item) => item.action === 'purge' && item.trashId === trashId)
+    assert.ok(record, 'the automatic purge is audited')
+    assert.equal(record.source, 'retention')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: trashRetentionDays 0 keeps entries forever', async () => {
+  const fixture = await makeFixture({ configOverrides: { trashRetentionDays: 0 } })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const listed = await fixture.api.__test.trashList()
+    const trashId = listed.entries[0].trashId
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 400 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(swept.enabled, false)
+    assert.deepEqual(swept.purged, [])
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: an entry that never committed is not swept, however old', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    await rm(fixture.seeded.get(S2).dir, { recursive: true, force: true })
+    const failed = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(failed.status, 500)
+
+    const listed = await fixture.api.__test.trashList()
+    assert.equal(listed.entries.length, 0)
+    assert.equal(listed.incomplete.length, 1)
+    const trashId = listed.incomplete[0].trashId
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 400 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.deepEqual(swept.purged, [])
+    // Still listed as incomplete so the user can inspect and discard it.
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), true)
+    const after = await fixture.api.__test.trashList()
+    assert.equal(after.incomplete.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
