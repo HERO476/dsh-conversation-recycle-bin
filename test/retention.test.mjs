@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { DAY_MS, daysUntilExpiry, selectExpired } from '../lib/core/retention.js'
+import { DAY_MS, DEFAULT_MAX_PER_RUN, daysUntilExpiry, selectExpired } from '../lib/core/retention.js'
 
 const NOW = 1_700_000_000_000
 const entry = (overrides) => ({
@@ -70,4 +70,19 @@ test('retention: daysUntilExpiry reports the remaining whole days', () => {
   assert.equal(daysUntilExpiry(entry({ deletedAt: NOW - 31 * DAY_MS }), { retentionDays: 30, now: NOW }), 0)
   assert.equal(daysUntilExpiry(entry({}), { retentionDays: 0, now: NOW }), null)
   assert.equal(daysUntilExpiry(entry({ deletedAt: undefined }), { retentionDays: 30, now: NOW }), null)
+})
+
+test('retention: the default per-run cap is shared, not duplicated', () => {
+  const entries = Array.from({ length: 30 }, (_, index) =>
+    entry({ trashId: `cap-${index}000`, deletedAt: NOW - (40 + index) * DAY_MS }))
+  assert.equal(selectExpired(entries, { retentionDays: 30, now: NOW }).length, DEFAULT_MAX_PER_RUN)
+  assert.equal(DEFAULT_MAX_PER_RUN, 20)
+})
+
+test('retention: a row that can never be swept gets no countdown', () => {
+  // A restored entry sits in the bin but the sweep only looks at `trashed`, so
+  // showing "auto-purged in 3 d" on it would promise something that never runs.
+  assert.equal(daysUntilExpiry(entry({ status: 'restored' }), { retentionDays: 30, now: NOW }), null)
+  assert.equal(daysUntilExpiry(entry({ status: 'pending' }), { retentionDays: 30, now: NOW }), null)
+  assert.equal(daysUntilExpiry(entry({ status: 'trashed' }), { retentionDays: 30, now: NOW }), 0)
 })

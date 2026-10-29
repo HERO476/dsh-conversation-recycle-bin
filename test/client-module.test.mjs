@@ -769,3 +769,32 @@ test('client: the primary button label follows the theme, not a hard-coded white
   )
 })
 
+
+test('client module: the retention notice reads the field the Host actually sends', async () => {
+  const { exported } = await loadClient()
+  const state = { limits: { trashRetentionDays: 30 } }
+  const now = 1_700_000_000_000
+  // The Host payload puts the window under `limits`; reading it from the top
+  // level (as 0.3.10 did) yields undefined and silences the whole notice.
+  assert.deepEqual(exported.__retentionInfo(state), { days: 30, daysLeft: null })
+  assert.deepEqual(exported.__retentionInfo({ trashRetentionDays: 30 }), { days: 0, daysLeft: null })
+  // The Host's own per-entry number wins over a locally recomputed one.
+  assert.deepEqual(
+    exported.__retentionInfo(state, { deletedAt: now - 29 * 86_400_000, daysLeft: 1 }, now),
+    { days: 30, daysLeft: 1 },
+  )
+  // An older Host without `daysLeft` still gets a countdown, and a row that can
+  // never be swept gets none.
+  assert.deepEqual(
+    exported.__retentionInfo(state, { status: 'trashed', deletedAt: now - 29 * 86_400_000 }, now),
+    { days: 30, daysLeft: 1 },
+  )
+  assert.deepEqual(
+    exported.__retentionInfo(state, { status: 'restored', deletedAt: now - 29 * 86_400_000 }, now),
+    { days: 30, daysLeft: null },
+  )
+  assert.deepEqual(
+    exported.__retentionInfo({ limits: { trashRetentionDays: 0 } }, { status: 'trashed', deletedAt: now }, now),
+    { days: 0, daysLeft: null },
+  )
+})

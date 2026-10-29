@@ -114,6 +114,8 @@ window.__ModuleLoader__.load({
         'trash.deletedAt': 'Deleted {time}',
         'trash.retention': 'Entries are purged automatically {days} days after deletion. Set trashRetentionDays to 0 to keep them until you purge them yourself.',
         'trash.expiresIn': 'auto-purged in {days} d',
+        'trash.expiresSoon': 'auto-purged on the next check',
+        'trash.swept': 'The Host cleaned up {count} expired entries in the background.',
         'trash.modeSoft': 'soft',
         'trash.modeHard': 'permanent',
         'trash.items': '{sessions} conversation(s) · {memories} memory entries',
@@ -272,6 +274,8 @@ window.__ModuleLoader__.load({
         'trash.deletedAt': '删除于 {time}',
         'trash.retention': '条目在删除 {days} 天后自动清理。把 trashRetentionDays 设为 0 可改为一直保留、由你自己彻底删除。',
         'trash.expiresIn': '{days} 天后自动清理',
+        'trash.expiresSoon': '下次检查时自动清理',
+        'trash.swept': 'Host 已在后台自动清理 {count} 条过期条目。',
         'trash.modeSoft': '软删除',
         'trash.modeHard': '彻底',
         'trash.items': '{sessions} 个对话 · {memories} 条记忆',
@@ -917,6 +921,33 @@ window.__ModuleLoader__.load({
       } catch {
         return String(value)
       }
+    }
+
+    /**
+     * The recycle-bin retention window, read from the Host payload.
+     *
+     * `trashRetentionDays` lives under `limits` — the same place as every other
+     * Host limit — and the Host also sends a per-entry `daysLeft`. Reading the
+     * top level (as 0.3.10 did) yields `undefined`, which used to switch the
+     * whole notice off: the bin was purged with no warning at all. The countdown
+     * prefers the Host's number so a skewed browser clock cannot promise a
+     * different day than the sweep keeps; the local computation is only a
+     * fallback for an older Host that does not send `daysLeft`.
+     */
+    function retentionInfo(state, entry = null, nowMs = Date.now()) {
+      const raw = Number(state?.limits?.trashRetentionDays)
+      const days = Number.isFinite(raw) && raw > 0 ? raw : 0
+      if (days <= 0) return { days: 0, daysLeft: null }
+      if (entry === null || entry === undefined) return { days, daysLeft: null }
+      // Only `trashed` rows are ever swept, so a restored or mid-transaction row
+      // must not advertise a deadline it will never reach.
+      if (entry.status !== undefined && entry.status !== 'trashed') return { days, daysLeft: null }
+      const hostDays = entry.daysLeft === null || entry.daysLeft === undefined ? Number.NaN : Number(entry.daysLeft)
+      if (Number.isFinite(hostDays) && hostDays >= 0) return { days, daysLeft: hostDays }
+      const deletedAt = Number(entry.deletedAt)
+      if (!Number.isFinite(deletedAt) || deletedAt <= 0) return { days, daysLeft: null }
+      const left = deletedAt + days * 86_400_000 - nowMs
+      return { days, daysLeft: left <= 0 ? 0 : Math.ceil(left / 86_400_000) }
     }
 
     /* ------------------------------------------------------------------ *
@@ -1588,6 +1619,10 @@ window.__ModuleLoader__.load({
       const [sessions, setSessions] = useState([])
       const [trash, setTrash] = useState([])
       const [incomplete, setIncomplete] = useState([])
+      // What the background retention sweep did last time, straight from the
+      // Host: entries that vanished between two refreshes get an explanation
+      // instead of looking like a rendering bug.
+      const [lastSweep, setLastSweep] = useState(null)
       const [audit, setAudit] = useState([])
       // Which tab is fetching right now. `null` means idle: the panels stay
       // mounted while a refresh runs, so the user keeps scroll position and
@@ -1634,6 +1669,7 @@ window.__ModuleLoader__.load({
             if (stale()) return
             setTrash(Array.isArray(response.entries) ? response.entries : [])
             setIncomplete(Array.isArray(response.incomplete) ? response.incomplete : [])
+            setLastSweep(response.lastSweep ?? null)
           } else if (which === 'batch') {
             const response = await api('/sessions')
             if (stale()) return
@@ -1808,14 +1844,14 @@ window.__ModuleLoader__.load({
         ? state.limits.effectiveBatch
         : (state?.limits?.maxBatchSessions ?? 0)
       const overLimit = effectiveBatch > 0 && selectedIds.length > effectiveBatch
-      // The Host purges entries on its own after `trashRetentionDays`; the row
-      // hint has to be computed from the same number or it would promise a
-      // window the Host does not keep.
-      const retentionDays = Number(state?.trashRetentionDays) > 0 ? Number(state.trashRetentionDays) : 0
-      const daysLeft = (entry) => {
-        if (retentionDays <= 0 || !Number.isFinite(entry?.deletedAt) || entry.deletedAt <= 0) return null
-        const left = entry.deletedAt + retentionDays * 86_400_000 - Date.now()
-        return left <= 0 ? 0 : Math.ceil(left / 86_400_000)
+      // The Host purges entries on its own after `trashRetentionDays`; both the
+      // banner and the per-row hint come from `retentionInfo`, which reads the
+      // field where the Host actually sends it (`limits`).
+      const retentionDays = retentionInfo(state).days
+      const expiryHint = (entry) => {
+        const left = retentionInfo(state, entry).daysLeft
+        if (left === null) return ''
+        return ` · ${left === 0 ? t('trash.expiresSoon') : t('trash.expiresIn', { days: left })}`
       }
 
       const openFeedback = () => dialogStore.open({
@@ -1882,12 +1918,15 @@ window.__ModuleLoader__.load({
 
         tab === 'trash' ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
           retentionDays > 0 ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.retention', { days: retentionDays })) : null,
+          Number(lastSweep?.purged) > 0
+            ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.swept', { count: Number(lastSweep.purged) }))
+            : null,
           trash.length === 0 ? h('div', { className: 'dc-empty' }, t('trash.empty')) : null,
           ...trash.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
               h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId),
               h('div', { className: 'dc-hint' },
-                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${daysLeft(entry) === null ? '' : ` · ${t('trash.expiresIn', { days: daysLeft(entry) })}`}`)),
+                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${expiryHint(entry)}`)),
             h('div', { className: 'dc-row-actions' },
               h(Button, { onClick: () => { void restore(entry.trashId) } }, t('action.restore')),
               purgeTarget === entry.trashId
@@ -1953,6 +1992,9 @@ window.__ModuleLoader__.load({
                 `${formatTime(record.at)} · ${t(`audit.${record.result ?? 'success'}`) ?? record.result ?? ''}`
                 + (record.mode ? ` · ${record.mode}` : '')
                 + (record.includeMemory ? ' · memory' : '')
+                // Automatic clean-up writes the same shape as a manual purge;
+                // without the source the two are indistinguishable in the UI.
+                + (typeof record.source === 'string' && record.source !== 'web-ui' ? ` · ${record.source}` : '')
                 + (record.error?.message ? ` · ${record.error.message}` : ''))),
             h('div', { className: 'dc-row-time' }, record.actor ?? '')))) : null)
     }
@@ -2146,6 +2188,10 @@ window.__ModuleLoader__.load({
     exports.__validateFeedbackInput = validateFeedbackInput
     exports.__feedbackLimits = FEEDBACK_LIMITS
     exports.__selectableSessionIds = selectableSessionIds
+    // Exposed because the retention notice lives inside a hook-heavy component
+    // the harness cannot render: this is the piece that decides whether the user
+    // is told at all, so it must be assertable against a real Host payload.
+    exports.__retentionInfo = retentionInfo
     exports.__adapterLabel = adapterLabel
     exports.__adapterReason = adapterReason
     exports.__loadUiFlags = loadUiFlags

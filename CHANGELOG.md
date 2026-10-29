@@ -3,6 +3,25 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.11] — 2026-10-27
+
+0.3.10 的修漏。上一版把「30 天自动清理」接上了，但三位独立审计各自复现出同一批问题：**后端真的在删，前端一个字都没说**，而且插件被关掉之后它还在删。本版把 8 条全部修掉。
+
+### Fixed
+
+- **自动清理的提示根本不会显示**（高，必现）：`client.js` 读的是 `state.trashRetentionDays`，而 Host 把它放在 `state.limits.trashRetentionDays` —— 于是横幅与每行的"N 天后自动清理"永远不渲染，用户看到的只是条目某天凭空消失。现在统一走 `retentionInfo()`，从 `limits` 读，并优先使用 Host 下发的每条 `daysLeft`（浏览器时钟偏差不会再承诺一个 Host 不认的日期）。
+- **`enabled: false` 拦不住后台清理**（高，数据销毁）：`sweepExpiredTrash()` 只看 `trashRetentionDays`，不看总开关；`lib/index.js` 的 60 秒/6 小时定时器也无条件注册 —— 用户关掉插件后 HTTP 全部 503（连回收站都打不开），后台却仍在按保留期永久删除条目和记忆包。现在清扫第一行就判 `config.enabled !== true`，禁用时定时器干脆不注册。读接口仍然可用（能看到箱子里有什么），只是不再自动删。
+- **打开回收站会等写锁，甚至顺手删掉本次要列出的条目**（中）：`trashList()` 里是 `await sweepExpiredTrash()`，清扫要取跨进程 mutation 锁（预算 180 s，队列预算再加 60 s），而客户端 15 s 就超时 —— 一次 restore/purge 进行中打开回收站，看到的是空白页，重试还会复用同一个 in-flight 请求。现在列表只 `void sweep()`，清扫在后台跑，`GET` 不再有删除副作用。
+- **无人值守时可能删掉"复活的会话"**（中）：`performPurge` 对 soft 条目会在会话又能被解析时 quiesce 并硬删。手动清理时这是对的，但 30 天后的定时器不该替用户做这个决定。现在清扫遇到 `mode: 'soft'` 且会话仍可解析的条目会跳过（记 `E_SESSION_ALIVE`，留给用户自己处理）。
+- **清理不可见**（中）：`/trash` 现在带 `lastSweep: { at, purged, failed }`，面板会写明"Host 已在后台自动清理 N 条"；审计行也显示 `source`，自动清理与手动彻底删除不再长得一模一样。
+- **失败重试无退避**（低）：单条失败从"每 5 分钟无脑重试"改为指数退避（5 min → 10 → 20 …，上限 6 h），并保留失败原因。
+- **`daysUntilExpiry()` 是死代码**（低）：现在 Host 在 `serializeEntry()` 里真的用它，每条带 `daysLeft` 与 `expiresAt`；顺带修掉"已恢复的条目也显示倒计时"和"0 d"两种空头承诺。
+- 单次清扫上限（20）不再在两处各写一遍常量，`retention.js` 导出 `DEFAULT_MAX_PER_RUN` 给 Host 复用。
+
+### Tests
+
+- `test/retention.test.mjs` 8 → 10 条（默认上限共用、永不清理的行不给倒计时）；`test/client-module.test.mjs` 新增 1 条，直接断言 `__retentionInfo()` 对**真实 Host 形状**（`limits.trashRetentionDays`）的解读；`test/api.test.mjs` 52 → 55 条（禁用不清理、列表不等锁、每条带倒计时）。测试 164 → **170**。
+
 ## [0.3.10] — 2026-10-27
 
 回收站「30 天后自动清理」。这一版把一个**从 0.3.0 起就写在配置里、但从来没人读**的旋钮（`trashRetentionDays`）真正接上了逻辑。

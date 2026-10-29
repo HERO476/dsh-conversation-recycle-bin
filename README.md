@@ -149,7 +149,7 @@ memory  →  messages  →  session/catalog
       files/<nodeId>.content
 ```
 
-**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），并且**每次打开回收站列表前也会扫一次**（5 分钟内不重复）。只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）。`trashRetentionDays: 0` 关闭清扫，条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条还显示剩余天数。
+**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），并且**每次打开回收站列表时在后台触发一次**（5 分钟内不重复；列表本身不等清扫，所以锁被占用也不会出现空白页）。只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先，失败按指数退避重试（5 分钟起，上限 6 小时）。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）；`mode: 'soft'` 且会话又能被解析的条目也会跳过（无人值守时不去碰"复活"的对话）。`trashRetentionDays: 0` 或 `enabled: false` 都会关闭清扫（后者连定时器都不注册，读接口仍然可用），条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条显示 Host 下发的剩余天数，后台刚清过东西时还会提示清了几条。
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 

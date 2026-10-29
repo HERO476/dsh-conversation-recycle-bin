@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
@@ -1464,6 +1464,97 @@ test('retention: an entry that never committed is not swept, however old', async
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), true)
     const after = await fixture.api.__test.trashList()
     assert.equal(after.incomplete.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: a disabled plugin never sweeps, and the bin stays unreachable', async () => {
+  const source = await makeFixture()
+  const disabled = await makeFixture({ configOverrides: { enabled: false } })
+  try {
+    const preview = await call(source.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    await call(source.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const trashId = (await source.api.__test.trashList()).entries[0].trashId
+    // Same manifest, different Host config: this is the "user turned the plugin
+    // off" case, and the timer used to keep deleting entries anyway.
+    await cp(join(source.paths.trashDir, trashId), join(disabled.paths.trashDir, trashId), { recursive: true })
+    const manifestPath = join(disabled.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 400 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const swept = await disabled.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(swept.enabled, false)
+    assert.deepEqual(swept.purged, [])
+    assert.equal(await pathExists(join(disabled.paths.trashDir, trashId)), true)
+
+    // Reads stay available so the user can see what is in the bin; only the
+    // janitor is switched off, which is the whole point of the gate.
+    const route = await call(disabled.api, '/trash', { method: 'GET' })
+    assert.equal(route.status, 200)
+    assert.deepEqual(route.body.entries.map((entry) => entry.trashId), [trashId])
+    assert.equal(route.body.lastSweep, null)
+  } finally {
+    await source.home.cleanup()
+    await disabled.home.cleanup()
+  }
+})
+
+test('retention: listing never waits for the mutation lock', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    // Read the id from disk: calling `trashList()` here would run a sweep and
+    // start the five-minute throttle, so the listing below would skip it.
+    const trashId = (await readdir(fixture.paths.trashDir))[0]
+    const entryDir = join(fixture.paths.trashDir, trashId)
+    const manifestPath = join(entryDir, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    // A live owner holds the cross-process lock, so a sweep that ran inline
+    // would sit in `acquire` for the full 180 s lock budget.
+    const lockPath = join(fixture.paths.dataDir, 'mutation.lock')
+    await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, nonce: 'held-by-test', at: Date.now() })}
+`, 'utf8')
+
+    const started = Date.now()
+    const listed = await call(fixture.api, '/trash', { method: 'GET' })
+    const elapsed = Date.now() - started
+    assert.equal(listed.status, 200)
+    assert.ok(elapsed < 1500, `listing took ${elapsed} ms`)
+    // The entry is still there: the response describes the bin as it was, and
+    // the sweep is a background concern.
+    assert.deepEqual(listed.body.entries.map((entry) => entry.trashId), [trashId])
+
+    // Let the background sweep finish so the fixture can be cleaned up.
+    await rm(lockPath, { force: true })
+    await fixture.api.__test.sweepExpiredTrash()
+    assert.equal(await pathExists(entryDir), false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: every entry carries the Host countdown', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const listed = await call(fixture.api, '/trash', { method: 'GET' })
+    const entry = listed.body.entries[0]
+    assert.equal(entry.daysLeft, 30)
+    assert.equal(entry.expiresAt, entry.deletedAt + 30 * 86_400_000)
+    assert.equal(listed.body.lastSweep !== undefined, true)
   } finally {
     await fixture.home.cleanup()
   }
