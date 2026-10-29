@@ -9,7 +9,7 @@ import { createDeleteApi, QUEUE_GRACE_MS, ROUTE_PREFIX, TRASH_LOCK_BUDGET_MS } f
 import { createSessionLogOps } from '../lib/host/catalog.js'
 import { createSessionGateway } from '../lib/host/gateway.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
-import { resolveDataPaths } from '../lib/host/paths.js'
+import { projectKey, readSessionLogCwd, resolveDataPaths } from '../lib/host/paths.js'
 import { callRoute, makeHttpPair, makeTempHome, makeWorkspaceRegistry, pathExists, seedSession } from './helpers.mjs'
 
 const S1 = 'session-aaaaaaaa-1111'
@@ -608,6 +608,10 @@ test('trash: an entry that never committed is listed and can be discarded', asyn
     assert.equal(trash.body.entries.length, 0)
     assert.equal(trash.body.incomplete.length, 1)
     assert.equal(trash.body.incomplete[0].status, 'failed')
+    // The failed entry has no payload anywhere: restoring it would be refused,
+    // so the advertised capability must say so (previously it was `true`).
+    assert.equal(trash.body.incomplete[0].capabilities.canRestore, false)
+    assert.equal(trash.body.incomplete[0].capabilities.canDiscard, true)
     const trashId = trash.body.incomplete[0].trashId
 
     const wrongPhrase = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'no' } })
@@ -1440,6 +1444,85 @@ test('retention: an entry older than trashRetentionDays is purged by the next li
     assert.equal(record.source, 'retention')
   } finally {
     await fixture.home.cleanup()
+  }
+})
+
+test('retention: an archived soft entry is purged when expired', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'soft' } })
+    const deleted = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(deleted.status, 200)
+    const trashId = (await readdir(fixture.paths.trashDir))[0]
+    const entryDir = join(fixture.paths.trashDir, trashId)
+
+    // The fixture registry keeps archive state in memory; the gateway reads the
+    // Host's workspace document, so mirror the soft delete's archive marker.
+    await writeFile(join(fixture.home.root, 'storages', 'workspace.json'), JSON.stringify({
+      unit: { name: 'workspace', version: 2 },
+      global: { initialized: true, workspaceIds: [], archivedSessionIds: [S2], pinnedSessionIds: [] },
+      tables: { workspaces: {} },
+    }), 'utf8')
+    const manifestPath = join(entryDir, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.deepEqual(swept.purged, [trashId])
+    assert.deepEqual(swept.failed, [])
+    assert.equal(await pathExists(entryDir), false)
+    // Soft delete keeps the log until the purge actually happens.
+    assert.equal(await pathExists(fixture.seeded.get(S2).dir), false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: a revived soft entry is kept for the user', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'soft' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const trashId = (await readdir(fixture.paths.trashDir))[0]
+    const entryDir = join(fixture.paths.trashDir, trashId)
+    const manifestPath = join(entryDir, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    // No archive marker: the user unarchived the conversation after deleting it.
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.deepEqual(swept.purged, [])
+    assert.deepEqual(swept.failed, [{ trashId, code: 'E_SESSION_ALIVE' }])
+    assert.equal(await pathExists(entryDir), true)
+    assert.equal(await pathExists(fixture.seeded.get(S2).dir), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('recovery: projectKey and the zstd log header rebuild the original path', async (t) => {
+  const zstd = await import('node:zlib')
+  if (typeof zstd.zstdCompressSync !== 'function') {
+    t.skip('this Node runtime has no zstd codec')
+    return
+  }
+  const home = await makeTempHome()
+  try {
+    const dir = join(home.root, 'sessions', 'scratch', 'session-aaaaaaaa-1111')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'session.v4.jsonl.zstd'), zstd.zstdCompressSync(
+      Buffer.from(`${JSON.stringify({ type: 'session', version: 4, cwd: 'D:\\Work' })}\n`, 'utf8'),
+    ))
+    assert.equal(projectKey('D:\\Work'), '--D-Work--')
+    assert.equal(await readSessionLogCwd(dir), 'D:\\Work')
+  } finally {
+    await home.cleanup()
   }
 })
 

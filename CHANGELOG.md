@@ -3,6 +3,23 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.13] — 2026-10-29
+
+2026-10-29 桌面端 / 网页端 bug 复核报告（`AUDIT-2026-10-29-desktop-web.md`）中的 4 条功能缺陷与 1 条文档偏差，本版全部修掉。
+
+### Fixed
+
+- **默认 soft 条目的 30 天自动清理永远不会执行（高）**：清扫过去只要会话"仍可解析"就跳过（`E_SESSION_ALIVE`），而 soft 删除的定义就是保留日志、归档后仍可被 `sessionPersistence.stat` 解析——默认方式删除的条目因此 100% 逃过保留期。现在只有会话**已被用户复活（`archived === false`）或仍在运行**时才跳过；仍处于归档状态（`archived === true`）的 soft 条目会像 hard 条目一样被 `performPurge` 清理。归档状态读不到时继续保守跳过。
+- **hard 删除在"日志已移动、manifest 未记录"的崩溃窗口里成为死条目（中）**：`messages` 步骤现在**先**把 `{from,to}` 写入 manifest，再执行目录移动；`session` 步骤也先落盘 catalog 快照再改工作区。即使进程在两步之间崩溃，两侧都可恢复（日志还在原位，或日志在回收站且目标已知）。
+- **旧版遗留的死条目仍可恢复**：`performRestore` 发现 `sessionLog: null` 且 `<entry>/session` 存在时，会从日志首行的 `cwd` 重建原路径（按 DSH 的 `projectKey` / `encodeSegment` 规则），把日志移回后再走 catalog 恢复。`node:zlib` 的 zstd 解码在 Node 22.15+ 才存在，故按需加载；更老的 Node 上该恢复路径会明确失败而不是让插件导入失败。
+- **`/trash` 的 capabilities 与路由不一致（低）**：`serializeEntry` 现在读取 `<entry>/session` 与 `<entry>/memory` 的磁盘载荷，并以此计算 `canRestore`（无任何载荷的 failed/pending 条目为 `false`）与 `canDiscard`（仍持有日志/记忆文件为 `false`）；无法读取 manifest 的目录也带同一套 capabilities。
+- **只有记忆包的未完成条目在 UI 没有恢复入口（低）**：`IncompleteEntries` 改为按 Host 的 `capabilities.canRestore` / `canDiscard` 渲染按钮，不再只看 `hasSessionLog`；旧 Host 未下发 capabilities 时保留原判断作为兜底。
+- **CHANGELOG 0.3.12 的 token 描述与实现不符（文档）**：实现只在**整批零失败**时作废 token（`failures.length === 0`）；部分或全部失败都保留 token，便于重试同一计划。0.3.12 条目已按实现更正，README 同步。
+
+### Tests
+
+- 新增 8 条：归档 soft 条目到期被清、复活 soft 条目被保留、日志映射在移动前落盘、崩溃窗口日志映射重建后可恢复、无载荷条目 `canRestore:false`、磁盘载荷阻止 discard、Client 按 capabilities 显示恢复/丢弃、zstd 日志头重建 `projectKey`。测试 178 → **186**。
+
 ## [0.3.12] — 2026-10-29
 
 0.3.9 那一轮三方审计留下的 15 条，这次全部清掉。其中一条是**锁毒化**：一次删不掉的锁文件会让后续所有删除/恢复一直返回 `E_LOCK_BUSY`，直到重启进程。
@@ -21,7 +38,7 @@ The format follows Keep a Changelog; the project uses Semantic Versioning.
 - **`trash.update()` 不再写垃圾 manifest**：条目读不到时返回 `null`，而不是把 `null` 展开成 `{trashId: null, ...}` 写进目录 —— 那种目录永远列不出、恢复不了、也 discard 不掉。
 - **manifest 的 `sessionId` 要过校验**：它会被 `join` 进 workspace 路径，手改 manifest 不能借 `..` 把清扫指到别处。
 - **路径守卫 fail-closed**：`performRestore` 在组合没提供 `isInsideSessionsRoot`/`isInsideTrashDir` 时改为拒绝（过去默认放行，等于守卫可选）。
-- **确认令牌不再被部分失败烧掉**：整批全失败时才作废 token，部分失败可以用同一个 token 重试剩余项（token 绑定 `(ids, mode, includeMemory)`，重放只会重跑同一计划）。
+- **确认令牌不再被部分失败烧掉**：只有**整批零失败**时才作废 token；部分失败或全部失败都保留，可用同一个 token 重试剩余项（token 绑定 `(ids, mode, includeMemory)`，重放只会重跑同一计划）。
 - **没有 connection 层时 `/state` 仍可读**：过去整站 401，面板只能显示"未授权"，用户无从得知该配 `requireConnection: false`。现在 `/state` 返回 200 并带 `connectionFence: false`，会话列表与回收站照旧 401。
 
 ### Tests

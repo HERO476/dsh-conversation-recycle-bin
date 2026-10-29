@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
-import { performPurge, performRestore, performSessionDelete } from '../lib/core/cascade.js'
+import { entryCapabilities, performPurge, performRestore, performSessionDelete } from '../lib/core/cascade.js'
 
 function makeTrash() {
   const entries = new Map()
@@ -395,6 +395,57 @@ test('restore: a pending entry whose bundle is only on disk is recovered instead
   assert.deepEqual(calls.map((call) => call[0]), ['memory-restore'])
   assert.equal(calls[0][1], 2)
   assert.equal(trash.entries.has(entry.trashId), false)
+})
+
+test('delete: the log mapping is persisted before the directory move', async () => {
+  const { ops } = makeOps()
+  const trash = makeTrash()
+  let persistedBeforeMove = false
+  ops.sessionLog.moveToTrash = async (session, entryDir, { beforeMove } = {}) => {
+    const mapping = { sessionId: session.id, from: '/sessions/session', to: '/trash/session' }
+    if (typeof beforeMove === 'function') await beforeMove(mapping)
+    const pending = [...trash.entries.values()][0]
+    persistedBeforeMove = pending?.sessionLog?.to === '/trash/session'
+    return mapping
+  }
+  await performSessionDelete({
+    session, mode: 'hard', includeMemory: false, ops, trash, audit: makeAudit(), config,
+  })
+  assert.equal(persistedBeforeMove, true, 'the crash window still had a null sessionLog')
+})
+
+test('restore: a pending entry whose log mapping was never recorded is reconstructed', async () => {
+  const { ops, calls } = makeOps()
+  ops.recoverSessionLog = async (entry) => ({ sessionId: entry.sessionId, from: '/sessions/session', to: '/trash/session' })
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't11-crash', sessionId: session.id, title: 'T', mode: 'hard', includeMemory: false,
+    // The crash window: the log sits in `session/`, but the manifest still
+    // says null (the old code wrote the mapping only after the move).
+    status: 'pending', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  await performRestore({ entry, ops, trash, audit: makeAudit(), now: () => 5_000 })
+  assert.deepEqual(calls.map((call) => call[0]), ['messages-restore'])
+  assert.equal(trash.entries.has(entry.trashId), false)
+})
+
+test('capabilities: an incomplete entry with no payload cannot be restored and can be discarded', () => {
+  const caps = entryCapabilities(
+    { status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 } },
+    { hasLogFiles: false, hasMemoryFiles: false, requirePayload: true },
+  )
+  assert.deepEqual(caps, { status: 'failed', canRestore: false, canPurge: false, canDiscard: true })
+})
+
+test('capabilities: a payload on disk makes restore possible and blocks discard', () => {
+  const empty = { status: 'pending', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 } }
+  const withLog = entryCapabilities(empty, { hasLogFiles: true, hasMemoryFiles: false, requirePayload: true })
+  assert.equal(withLog.canRestore, true)
+  assert.equal(withLog.canDiscard, false)
+  const withMemory = entryCapabilities(empty, { hasLogFiles: false, hasMemoryFiles: true, requirePayload: true })
+  assert.equal(withMemory.canRestore, true)
+  assert.equal(withMemory.canDiscard, false)
 })
 
 test('restore: a manifest pointing outside the sessions root is refused before any move', async () => {

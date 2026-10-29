@@ -1559,39 +1559,55 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dc-panel dc-incomplete' },
         h('div', { className: 'dc-state-title' }, `${t('trash.incompleteTitle')} (${entries.length})`),
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
-        ...entries.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
-          h('div', { className: 'dc-row-main' },
-            h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId || entry.trashId),
-            h('div', { className: 'dc-hint' }, entry.status === 'unreadable' && entry.error?.message
-              ? `${t('trash.status.unreadable')} · ${entry.error.message}`
-              : `${t(`trash.status.${entry.status}`)} · ${formatTime(entry.updatedAt ?? entry.deletedAt)} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
-          h('div', { className: 'dc-row-actions' },
-            entry.hasSessionLog === true && typeof onRestore === 'function'
-              ? h(Button, {
-                onClick: () => onRestore(entry.trashId),
-                disabled: restoreBusyId === entry.trashId,
-                title: t('trash.restoreIncompleteHint'),
-              }, t('action.restore'))
-              : null,
-            discardTarget === entry.trashId
-              ? h('span', { className: 'dc-inline-confirm' },
-                h('input', {
-                  type: 'text',
-                  value: discardPhrase,
-                  placeholder: 'DELETE',
-                  className: 'dc-input dc-input-small',
-                  onChange: (event) => onPhrase(event.target.value),
-                }),
-                h(Button, {
-                  variant: 'danger',
-                  disabled: discardBusyId === entry.trashId || discardPhrase.trim() !== 'DELETE',
-                  onClick: () => onDiscard(entry.trashId),
-                }, t('trash.discard')),
-                h(Button, { disabled: discardBusyId === entry.trashId, onClick: onCancel }, t('action.cancel')))
-              : h(Button, {
-                onClick: () => onStart(entry.trashId),
-                title: t('trash.confirmDiscard'),
-              }, t('trash.discard'))))))
+        ...entries.map((entry) => {
+          // The Host knows what is actually recoverable (a moved log, a memory
+          // bundle, or nothing at all). Falling back to `hasSessionLog` keeps
+          // older Hosts working, but a memory-only entry used to show Discard
+          // only — the route refuses that while memory files remain — so the
+          // one action the Host offered was its API, not the UI.
+          const canRestore = entry.capabilities === undefined
+            ? entry.hasSessionLog === true
+            : entry.capabilities?.canRestore === true
+          const canDiscard = entry.capabilities === undefined
+            ? true
+            : entry.capabilities?.canDiscard !== false
+          return h('div', { key: entry.trashId, className: 'dc-row' },
+            h('div', { className: 'dc-row-main' },
+              h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId || entry.trashId),
+              h('div', { className: 'dc-hint' }, entry.status === 'unreadable' && entry.error?.message
+                ? `${t('trash.status.unreadable')} · ${entry.error.message}`
+                : `${t(`trash.status.${entry.status}`)} · ${formatTime(entry.updatedAt ?? entry.deletedAt)} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}`)),
+            h('div', { className: 'dc-row-actions' },
+              canRestore === true && typeof onRestore === 'function'
+                ? h(Button, {
+                  onClick: () => onRestore(entry.trashId),
+                  disabled: restoreBusyId === entry.trashId,
+                  title: t('trash.restoreIncompleteHint'),
+                }, t('action.restore'))
+                : null,
+              canDiscard !== true
+                ? null
+                : discardTarget === entry.trashId
+                  ? h('span', { className: 'dc-inline-confirm' },
+                    h('input', {
+                      type: 'text',
+                      value: discardPhrase,
+                      placeholder: 'DELETE',
+                      className: 'dc-input dc-input-small',
+                      onChange: (event) => onPhrase(event.target.value),
+                    }),
+                    h(Button, {
+                      variant: 'danger',
+                      disabled: discardBusyId === entry.trashId || discardPhrase.trim() !== 'DELETE',
+                      onClick: () => onDiscard(entry.trashId),
+                    }, t('trash.discard')),
+                    h(Button, { disabled: discardBusyId === entry.trashId, onClick: onCancel }, t('action.cancel')))
+                  : h(Button, {
+                    onClick: () => onStart(entry.trashId),
+                    title: t('trash.confirmDiscard'),
+                  }, t('trash.discard')))
+          )
+        }))
     }
 
     /**

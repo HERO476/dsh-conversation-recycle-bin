@@ -491,6 +491,64 @@ test('client: an incomplete entry that still holds its log offers a restore acti
   assert.equal(findButton(rows[1], restoreTitle), null)
 })
 
+test('client: incomplete actions follow the Host capabilities', async () => {
+  const { exported } = await loadClient()
+  const restored = []
+  const tree = exported.__components.IncompleteEntries({
+    entries: [
+      // Memory-only payload: the Host can restore it, and discard is refused
+      // while memory files remain.
+      {
+        trashId: 'abc-1', sessionId: 'session-bbbbbbbb-2222', status: 'pending', updatedAt: Date.now(), memory: 2, hasSessionLog: false,
+        capabilities: { status: 'pending', canRestore: true, canPurge: false, canDiscard: false },
+      },
+      // Nothing recoverable: only discard.
+      {
+        trashId: 'abc-2', sessionId: 'session-cccccccc-3333', status: 'failed', updatedAt: Date.now(), memory: 0, hasSessionLog: true,
+        capabilities: { status: 'failed', canRestore: false, canPurge: false, canDiscard: true },
+      },
+    ],
+    discardTarget: null,
+    discardPhrase: '',
+    onPhrase() {},
+    onStart() {},
+    onCancel() {},
+    onDiscard() {},
+    onRestore: (trashId) => restored.push(trashId),
+    restoreBusyId: null,
+  })
+  const rows = tree.children.filter((child) => child?.props?.className === 'dc-row')
+  assert.equal(rows.length, 2)
+
+  const findButton = (node, title) => {
+    if (node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = findButton(item, title)
+        if (found !== null) return found
+      }
+      return null
+    }
+    if (node.props?.title === title) return node
+    for (const child of node.children ?? []) {
+      const found = findButton(child, title)
+      if (found !== null) return found
+    }
+    return null
+  }
+  const restoreTitle = exported.__t('trash.restoreIncompleteHint')
+  const discardTitle = exported.__t('trash.confirmDiscard')
+
+  const restoreButton = findButton(rows[0], restoreTitle)
+  assert.ok(restoreButton !== null, 'a memory-only entry must offer restore')
+  restoreButton.props.onClick()
+  assert.deepEqual(restored, ['abc-1'])
+  assert.equal(findButton(rows[0], discardTitle), null, 'discard is refused while memory files exist')
+
+  assert.equal(findButton(rows[1], restoreTitle), null, 'an entry with no payload has nothing to restore')
+  assert.ok(findButton(rows[1], discardTitle) !== null)
+})
+
 test('client: the batch picker disables rows the Host refuses and says why', async () => {
   const { exported } = await loadClient()
   const blocked = exported.__components.BatchSessionRow({

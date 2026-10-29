@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.3.5`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.3.13`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -97,14 +97,14 @@ memory  →  messages  →  session/catalog
 1. `POST /preview`：校验 session 存在、工作区归属、是否受保护/子代理/超出允许根；hard 模式下活跃会话不再拒绝，而是给出「会先停止该会话」的 warning（`stopLiveSessions:false` 时仍拒绝）。随后统计日志条数与记忆数，签发**单次使用**确认 token（绑定排序后的 sessionIds + includeMemory + mode，TTL 默认 120s）。
 2. `POST /delete`：
    - 传输层依次过三道闸：本路由自身的 loopback/Origin（比较完整 authority：主机名**和**有效端口，桌面 `dsh-app://app` 外壳源按 DSH 自己的口径豁免）/私有 header 校验 → DSH `connection.requestRejection`（401/403 短路）→ `ctx.waterfall('connection/request', ...)`（桌面更新任务借此在安装更新时返回 503 并排空在途请求，删除事务不会被杀在半路）；
-   - token（彻底删除无需短语；批量软删除校验数量）、**有效批量上限** `min(maxBatchSessions, 本分钟剩余额度)`、限流（默认 20 次/分钟，滑动窗口）全部通过后才消费 token；
+   - token（彻底删除无需短语；批量软删除校验数量）、**有效批量上限** `min(maxBatchSessions, 本分钟剩余额度)`、限流（默认 20 次/分钟，滑动窗口）全部通过后才执行；token 只在**整批零失败**时作废，部分或全部失败都保留（重放只能重跑同一计划），避免用户为同一批失败项重新预览；
    - 先对**全部**会话做策略预检，任一被拒绝则整批不执行（不会半成功）；
    - 逐会话执行 `quiesce(live) → memory → messages → session/catalog` 事务；
    - 所有 mutation（delete/restore/purge/discard）串行经过进程内链 + `<dataDir>/mutation.lock` 跨进程文件锁：桌面端与 `dsh web` 共享一个 `DSH_HOME` 时，第二个实例的并发删除会拿到 `E_LOCK_BUSY` 而不是写坏同一份 manifest；
    - 队列与锁都有预算，不会无限等待：排队超过 `lockTimeoutMs + 60s` 抛 `E_QUEUE_TIMEOUT`（503，**未执行任何动作**，可安全重试）；客户端在排队或取锁期间断开（关标签页/刷新）抛 `E_ABANDONED`（409，同样未执行）。两者都表示"什么都没发生"，与 `E_TRANSACTION_FAILED`（可能已部分执行）区分开；
    - 锁文件 stale 判定：pid 可证明已死才立即破锁；无 owner 的锁只按 age 破；**持有者活着时绝不按 age 破**（否则长 GC 会放进第二个写者）。连续 3 次删不掉 stale 锁即 `E_LOCK_BUSY`，不空转；
    - 返回 `{ok: true, partial, results, failures}`：`ok` 表示计划已执行，`partial` 表示有会话失败；只有**全部**失败时才抛首个错误（HTTP 状态来自 `ERROR_STATUS`，错误码保留真实策略码）。
-3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging））、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志的条目应走「恢复」而不是 discard）。未完成条目若还留着会话日志，设置页会给出「恢复」按钮，可以直接把它恢复回会话列表。
+3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging）；每行带 `capabilities`，其 `canRestore`/`canDiscard` 同时看 manifest 与磁盘载荷）、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志或记忆文件的条目应走「恢复」而不是 discard）。未完成条目若还留着会话日志或记忆包，设置页会按 `capabilities.canRestore` 给出「恢复」按钮，可以直接把它恢复回会话列表；hard 删除在「日志已移入回收站、manifest 尚未记录」的崩溃窗口里，restore 会从日志头部的 `cwd` 重建原路径并把日志移回，不再出现三路全拒的死条目。
 4. `GET /audit?limit=N`。
 
 ### 4.2 安全清单
@@ -149,7 +149,7 @@ memory  →  messages  →  session/catalog
       files/<nodeId>.content
 ```
 
-**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），并且**每次打开回收站列表时在后台触发一次**（5 分钟内不重复；列表本身不等清扫，所以锁被占用也不会出现空白页）。只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先，失败按指数退避重试（5 分钟起，上限 6 小时）。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）；`mode: 'soft'` 且会话又能被解析的条目也会跳过（无人值守时不去碰"复活"的对话）。`trashRetentionDays: 0` 或 `enabled: false` 都会关闭清扫（后者连定时器都不注册，读接口仍然可用），条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条显示 Host 下发的剩余天数，后台刚清过东西时还会提示清了几条。
+**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），并且**每次打开回收站列表时在后台触发一次**（5 分钟内不重复；列表本身不等清扫，所以锁被占用也不会出现空白页）。只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先，失败按指数退避重试（5 分钟起，上限 6 小时）。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）；`mode: 'soft'` 且会话已被用户复活（未归档）或仍在运行的条目会跳过（无人值守时不去碰正在使用的对话），而仍处于归档状态的 soft 条目会照常清理——soft 删除本身保留日志，不再因为"日志还在"而永久逃过保留期。`trashRetentionDays: 0` 或 `enabled: false` 都会关闭清扫（后者连定时器都不注册，读接口仍然可用），条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条显示 Host 下发的剩余天数，后台刚清过东西时还会提示清了几条。
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 
@@ -206,7 +206,7 @@ dsh-conversation-recycle-bin/
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 138 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 186 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -215,7 +215,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（138 个用例）
+npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（186 个用例）
 npm run check   # 语法 + manifest
 ```
 
@@ -303,8 +303,8 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
-node test/feedback.test.mjs        # 19 个反馈用例
-npm test                           # 全量 138 个用例
+node test/feedback.test.mjs        # 20 个反馈用例
+npm test                           # 全量 186 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'
