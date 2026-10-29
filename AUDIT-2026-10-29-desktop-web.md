@@ -191,3 +191,17 @@ CHANGELOG 0.3.12 写“整批全失败时才作废 token，部分失败可以用
 | 测试 | 新增 8 条：归档 soft 到期清理、复活 soft 保留、日志映射移动前落盘、崩溃窗口日志映射重建、无载荷 `canRestore:false`、磁盘载荷阻止 discard、Client 按 capabilities 显示、`projectKey` + zstd 日志头 | 178 → **186** |
 
 本轮修复同时把 `AUDIT-2026-10-29-desktop-web.md` 加入仓库；审计期间的临时宿主与脚本再次清理，隔离 Host 已停止。产品代码改动见 `CHANGELOG.md#0313`。
+
+---
+
+## 7. 发布记录（0.3.13，2026-10-29）
+
+| 项 | 值 |
+|---|---|
+| Git 提交 | `a502066`（`release: v0.3.13 — 修复桌面/网页复核的 4 个缺陷与 token 文档偏差`），已推送 `origin/main` |
+| Git 标签 | `v0.3.13`（tag 对象 `0fc477f`，指向 `a502066`），已推送 origin |
+| npm | `dsh-conversation-recycle-bin@0.3.13`，`dist-tags.latest = 0.3.13` |
+| npm tarball | `shasum 704f96ac9cc8a5cd9a57220249a41d76d1d6d6dd`，36 个文件 / 546,795 B 解包 |
+| 发布前门禁 | `npm test` 186/186，`npm run check` 9/9 |
+
+发布采用 `npm publish --loglevel=error`，npm 日志为 `PUT 202`；随后 `npm view` 已可见 `latest = 0.3.13` 且 shasum 与发布日志一致。桌面 profile 通过 Junction 指向本工作树，**需重启桌面端**才能加载新的 Host 半与 Client bundle。
