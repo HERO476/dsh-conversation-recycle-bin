@@ -3,6 +3,31 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.12] — 2026-10-29
+
+0.3.9 那一轮三方审计留下的 15 条，这次全部清掉。其中一条是**锁毒化**：一次删不掉的锁文件会让后续所有删除/恢复一直返回 `E_LOCK_BUSY`，直到重启进程。
+
+### Fixed
+
+- **锁毒化（P1）**：`release()` 删不掉锁文件时，过去只 `warn` 一句就走人 —— 残留锁的 `owner.pid` 是**自己这个活进程**，而 stale 判定对活 owner 永不放行，于是下一次 `acquire()` 必定失败，之后每一次 mutation 都是 409，只能重启。现在 release 失败会把锁体降级成 `{pid: null, at: 0}`（并把 mtime 拨到纪元），下一次 acquire 按"无主且超龄"立即破锁；实在写不进去才留 warn。
+- **PID 复用**：心跳每 5 秒刷新一次 mtime，所以"十拍未刷新"（`staleMs * 10`）就按残留锁处理并告警，不再出现"这个 pid 恰好被别的进程复用、于是永远破不了锁"。
+- **队列超时不再撒谎**：计时器过去从入队一直武装到结束，操作其实已经开跑时仍返回"没有执行"。现在操作一开始就 `clearTimeout`，只有真正还在排队时才报 `E_QUEUE_TIMEOUT`。
+- **客户端预算不再比宿主早 60 秒**：`/preview` 与 `/state` 的 `limits` 新增 `queueTimeoutMs`（宿主实际使用的队列预算），客户端优先用它；过去客户端只按锁预算推算，宿主的队列预算比它多 60 秒，于是"还在跑"看起来像超时失败。
+- **`running` 不再被兜成 `false`**：`gateway.inspect()` 的 `running: fromList?.running ?? false` 让"宿主没说"和"已停止"无法区分，`lifecycle.js` 的 fail-closed 分支成了死代码。现在保留 `undefined`，并且 `probeRunning()` 能回答时以它为准（`agents.get(id)?.status === 'running'`）。
+- **空闲会话又能删了**：硬删闸门过去看 `live`（"宿主还知道这个会话"），空闲会话也满足，于是 `stopLiveSessions: false` 时所有空闲对话都删不掉。现在看 `session.running`；宿主不报状态时才按严格读法（未知视为在跑）。
+- **`capabilities` 不再是死字段**：回收站行的「恢复」/「彻底删除」按 `entry.capabilities.canRestore/canPurge` 置灰，不再让用户点了才知道会被拒。
+- **新错误码有文案了**：`E_QUEUE_TIMEOUT`、`E_ABANDONED` 补上中英文案。
+- **审计标题对称**：purge/discard 记录统一写 `title: null`（键保留），delete/restore 仍写真实标题，消费者不必按 action 分支解析。
+- **`trash.update()` 不再写垃圾 manifest**：条目读不到时返回 `null`，而不是把 `null` 展开成 `{trashId: null, ...}` 写进目录 —— 那种目录永远列不出、恢复不了、也 discard 不掉。
+- **manifest 的 `sessionId` 要过校验**：它会被 `join` 进 workspace 路径，手改 manifest 不能借 `..` 把清扫指到别处。
+- **路径守卫 fail-closed**：`performRestore` 在组合没提供 `isInsideSessionsRoot`/`isInsideTrashDir` 时改为拒绝（过去默认放行，等于守卫可选）。
+- **确认令牌不再被部分失败烧掉**：整批全失败时才作废 token，部分失败可以用同一个 token 重试剩余项（token 绑定 `(ids, mode, includeMemory)`，重放只会重跑同一计划）。
+- **没有 connection 层时 `/state` 仍可读**：过去整站 401，面板只能显示"未授权"，用户无从得知该配 `requireConnection: false`。现在 `/state` 返回 200 并带 `connectionFence: false`，会话列表与回收站照旧 401。
+
+### Tests
+
+- 新增 8 条：锁降级后可再次获取、十拍未心跳破锁、`limits.queueTimeoutMs` 与 `TRASH_LOCK_BUDGET_MS + 60s` 一致、无 fence 时 `/state` 可读而其它端点 401、部分失败后 token 仍可用、`capabilities` 出现在条目上、越界 `sessionId` 的 manifest 不可读、缺路径守卫时拒绝恢复。测试 170 → **178**。
+
 ## [0.3.11] — 2026-10-27
 
 0.3.10 的修漏。上一版把「30 天自动清理」接上了，但三位独立审计各自复现出同一批问题：**后端真的在删，前端一个字都没说**，而且插件被关掉之后它还在删。本版把 8 条全部修掉。

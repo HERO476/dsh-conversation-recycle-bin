@@ -216,6 +216,8 @@ window.__ModuleLoader__.load({
         'error.E_FORBIDDEN_ORIGIN': 'The Host rejected this page as an untrusted origin.',
         'error.E_POLICY_FOREIGN_WRITER': 'Another DSH instance is still writing this conversation; close it there and retry.',
         'error.E_LOCK_BUSY': 'Another DSH instance is using this recycle bin; retry in a moment.',
+        'error.E_QUEUE_TIMEOUT': 'The Host was still busy with another change, so this request was not applied. Retry in a moment.',
+        'error.E_ABANDONED': 'The page gave up waiting before the Host started; nothing was changed. Retry.',
         'error.E_UNAUTHORIZED': 'This request is not authenticated with the Host.',
         'adapter.lingshu': 'Lingshu cognitive graph (md_cg)',
         'adapter.generic-json': 'Generic JSON memory store',
@@ -376,6 +378,8 @@ window.__ModuleLoader__.load({
         'error.E_FORBIDDEN_ORIGIN': '宿主拒绝了该页面的请求（来源校验未通过）。',
         'error.E_POLICY_FOREIGN_WRITER': '另一个 DSH 实例仍在写这个对话，已中止删除；请先关闭那边的对话再重试。',
         'error.E_LOCK_BUSY': '另一个 DSH 实例正在使用回收站，请稍后重试。',
+        'error.E_QUEUE_TIMEOUT': '宿主还在处理另一个变更，这次请求没有执行，请稍后重试。',
+        'error.E_ABANDONED': '页面在宿主开始处理前就放弃了等待，本次没有做任何改动，请重试。',
         'error.E_UNAUTHORIZED': '该请求未通过宿主的鉴权。',
         'adapter.lingshu': '灵枢认知图 (md_cg)',
         'adapter.generic-json': '通用 JSON 记忆存储',
@@ -1109,9 +1113,15 @@ window.__ModuleLoader__.load({
           // memory locks, per-item moves) replaces the client's flat guess:
           // aborting while the Host keeps deleting left a consumed token and a
           // half-changed list behind.
-          const planTimeout = Number.isFinite(preview?.limits?.planTimeoutMs)
-            ? Math.max(1_000, preview.limits.planTimeoutMs)
-            : mutationTimeoutMs(sessionIds.length)
+          // The Host publishes the budget it actually enforces: the lock wait
+          // plus the queue grace period. The lock-only estimate used to abort
+          // 60 s before the Host gave up, so a busy bin looked like a failure
+          // while the deletion was still running.
+          const planTimeout = Number.isFinite(preview?.limits?.queueTimeoutMs)
+            ? Math.max(1_000, preview.limits.queueTimeoutMs)
+            : Number.isFinite(preview?.limits?.planTimeoutMs)
+              ? Math.max(1_000, preview.limits.planTimeoutMs)
+              : mutationTimeoutMs(sessionIds.length)
           const result = await api('/delete', {
             method: 'POST',
             timeoutMs: planTimeout,
@@ -1928,7 +1938,13 @@ window.__ModuleLoader__.load({
               h('div', { className: 'dc-hint' },
                 `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${expiryHint(entry)}`)),
             h('div', { className: 'dc-row-actions' },
-              h(Button, { onClick: () => { void restore(entry.trashId) } }, t('action.restore')),
+              // The Host already knows whether this entry can be restored;
+              // the panel used to offer the button and then show the refusal.
+              h(Button, {
+                disabled: entry.capabilities?.canRestore === false,
+                title: entry.capabilities?.canRestore === false ? t('error.E_TRASH_CONFLICT') : t('action.restore'),
+                onClick: () => { void restore(entry.trashId) },
+              }, t('action.restore')),
               purgeTarget === entry.trashId
                 ? h('span', { className: 'dc-inline-confirm' },
                   h('input', {
@@ -1941,7 +1957,12 @@ window.__ModuleLoader__.load({
                     onClick: () => { void purge(entry.trashId, purgePhrase.trim()) },
                   }, t('action.purge')),
                   h(Button, { disabled: purgeBusy === true, onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
-                : h(Button, { variant: 'danger', onClick: () => { setPurgeTarget(entry.trashId); setPurgePhrase('') } }, t('action.purge')))))) : null,
+                : h(Button, {
+                  variant: 'danger',
+                  disabled: entry.capabilities?.canPurge === false,
+                  title: entry.capabilities?.canPurge === false ? t('error.E_TRASH_CONFLICT') : t('action.purge'),
+                  onClick: () => { setPurgeTarget(entry.trashId); setPurgePhrase('') },
+                }, t('action.purge')))))) : null,
 
         tab === 'trash' && incomplete.length > 0 ? h(IncompleteEntries, {
           entries: incomplete,
