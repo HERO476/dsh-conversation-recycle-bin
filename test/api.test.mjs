@@ -1098,16 +1098,29 @@ test('trash: a corrupt manifest is surfaced as unreadable and discardable once e
     assert.equal(discarded.status, 200)
     assert.equal(await pathExists(corruptDir), false)
 
-    // A folder still holding a moved log is refused even without a readable manifest.
+    // A log with no readable manifest has no session id, so there is no path it
+    // could ever be restored to: discard is the only way to reclaim it, and the
+    // phrase confirms the user knows it is gone for good.
     const heldId = 'def-654321'
     const heldDir = join(fixture.paths.trashDir, heldId)
     await mkdir(join(heldDir, 'session'), { recursive: true })
     await writeFile(join(heldDir, 'session', 'session.jsonl.zstd'), Buffer.alloc(8, 7), 'utf8')
     await writeFile(join(heldDir, 'manifest.json'), 'junk', 'utf8')
-    const refused = await call(fixture.api, '/trash/discard', { body: { trashId: heldId, confirmPhrase: 'DELETE' } })
+    const discardedLog = await call(fixture.api, '/trash/discard', { body: { trashId: heldId, confirmPhrase: 'DELETE' } })
+    assert.equal(discardedLog.status, 200)
+    assert.equal(await pathExists(heldDir), false)
+
+    // Memory bundles are the exception: they can be restored once the manifest
+    // is repaired, so discard stays refused while one is on disk.
+    const memoryId = 'ghi-111111'
+    const memoryDir = join(fixture.paths.trashDir, memoryId)
+    await mkdir(join(memoryDir, 'memory', 'codex'), { recursive: true })
+    await writeFile(join(memoryDir, 'memory', 'codex', 'bundle.json'), '{"count":1,"entries":[]}', 'utf8')
+    await writeFile(join(memoryDir, 'manifest.json'), 'junk', 'utf8')
+    const refused = await call(fixture.api, '/trash/discard', { body: { trashId: memoryId, confirmPhrase: 'DELETE' } })
     assert.equal(refused.status, 409)
     assert.equal(refused.body.error.code, 'E_TRASH_CONFLICT')
-    assert.equal(await pathExists(heldDir), true)
+    assert.equal(await pathExists(memoryDir), true)
   } finally {
     await fixture.home.cleanup()
   }

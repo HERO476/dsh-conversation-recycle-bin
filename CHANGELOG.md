@@ -3,6 +3,30 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.14] — 2026-10-30
+
+第二轮独立审计（架构 / 安全 / 验收各跑 186 条、并做了变异测试与真实探针）之后的修复：一条会**删掉唯一副本**的读盘失败被当成「空目录」，一条会把用户**刚恢复的对话**再删一次，还有一类条目**三条出路全拒**却仍在 UI 上提供「恢复」按钮。
+
+### Fixed
+
+- **`hasFiles()` 不再把「读不到」当成「没有文件」**（`lib/host/api.js`）：`catch { return false }` 让 Windows 的 EPERM/EBUSY 读失败等价于「空目录」，`canDiscard` 因此为 true，丢弃该条目会连同唯一的 `memory/` bundle 一起删除。现在只有 `ENOENT`/`ENOTDIR` 才算空，其它错误抛出；`entryDisk()` 捕获后按 **「可能有文件」** 上报，`performDiscard()` 的 `hasFiles` 失败同样按「有文件」拒绝。
+- **保留期清扫不再删除用户刚恢复的会话**（`lib/core/cascade.js`、`lib/host/api.js`）：`performPurge` 的 soft 分支只看 `session.live`，不看 `archived`；用户 unarchive 之后，1.5s 的 gateway 缓存窗口内执行清扫会 quiesce 并硬删这个**正在使用的**会话。现在 purge 先判 `archived === false` 并抛 `E_SESSION_ALIVE`（409，新增码），清扫在拿锁后先 `gateway.invalidate()` 再 inspect，被跳过的条目按 6 小时退避，不再每轮刷一次失败。
+- **purge 的状态写入挪到判定之后**：`inspect()` 曾放在 `trash.update(status:'purging')` 之后且不在 try 内，一次 inspect 异常就把条目永久留在 `purging`（既不可恢复也不再被保留期清扫）。
+- **头不可读的日志条目现在有出路**：日志在盘上但读不出 `cwd`（截断、编码不对、缺少 header）时，条目永远到不了终态，而「恢复」会答"没有可恢复的内容"、"丢弃"又说"还持有日志"、purge 因状态不可达 —— 三条路全拒，磁盘空间占着。现在：`entryCapabilities()` 接受 `payloadRecoverable: false`，`canRestore` 为 false、`canDiscard` 为 true；`performRestore` 明确报「日志读不出，请丢弃」；`performDiscard` 在重建路径失败时允许删除（仍要求输入确认短语）。
+- **`ops.hasFiles` 的 `readdir` 结果只在目录存在时解释**，未捕获的非 ENOENT 错误不再被静默吞掉。
+
+### Changed
+
+- **`engines.node` 从 `>=20` 提高到 `>=22.15`**：代码用到 22.x 的 `readdir(..., { recursive: true })` 与 `AbortSignal` 行为，而 `>=20` 让 DSH 在 Node 20 上安装本插件后必然崩。
+- 测试夹具 `makeTempHome()` 先 `mkdir test/.tmp`：干净检出上 `mkdtemp` 会 ENOENT，之前能过只是因为某个套件恰好先跑并顺手建了目录（干净树实测 160 pass / 26 fail）。
+
+### Tests
+
+- 新增 `session log stage: the mapping is persisted before the directory moves`（真实 `moveToTrash` + 真实文件系统，断言 `beforeMove` 时源目录仍在、目标尚不存在）。把 `catalog.js` 里 `moveDirectory` 与 `beforeMove` 调换后该用例失败——此前这处变异**全套 186 条仍绿**。
+- 新增 `unrecoverable log: not restorable, and discard is the way out`（真实目录 + 头不可读 → `canRestore:false`、`canDiscard:true`、restore 报错文案、discard 成功）。
+- `trash: a corrupt manifest is surfaced as unreadable and discardable once empty` 更新为符合新语义，并补一条「manifest 损坏但 `memory/` 有文件 → 仍拒绝丢弃」。
+- 测试 186 → **188**；干净树（先删 `test/.tmp`）`node --test test/*.test.mjs` 全绿，不再依赖套件执行顺序。
+
 ## [0.3.13] — 2026-10-29
 
 2026-10-29 桌面端 / 网页端 bug 复核报告（`AUDIT-2026-10-29-desktop-web.md`）中的 4 条功能缺陷与 1 条文档偏差，本版全部修掉。

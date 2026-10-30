@@ -12,6 +12,11 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export async function makeTempHome(prefix = 'dsh-conversation-recycle-bin-test-') {
+  // `mkdtemp` needs the PARENT to exist. Without this, a checkout whose
+  // `test/.tmp` had just been cleaned failed every suite with ENOENT, and the
+  // only reason `npm test` looked green was that one suite happened to run
+  // first and create the directory as a side effect.
+  await mkdir(join(process.cwd(), 'test', '.tmp'), { recursive: true })
   const root = await mkdtemp(join(process.cwd(), 'test', '.tmp', prefix))
   await mkdir(join(root, 'sessions'), { recursive: true })
   await mkdir(join(root, 'storages'), { recursive: true })

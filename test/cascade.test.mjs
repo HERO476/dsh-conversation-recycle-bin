@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
-import { entryCapabilities, performPurge, performRestore, performSessionDelete } from '../lib/core/cascade.js'
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { entryCapabilities, performDiscard, performPurge, performRestore, performSessionDelete } from '../lib/core/cascade.js'
+import { createSessionLogOps } from '../lib/host/catalog.js'
+import { makeTempHome } from './helpers.mjs'
 
 function makeTrash() {
   const entries = new Map()
@@ -514,4 +518,103 @@ test('restore: a composition without the path guards refuses instead of trusting
   )
   assert.deepEqual(calls, [])
   assert.equal(trash.entries.has(entry.trashId), true)
+})
+
+// The manifest must learn the move BEFORE the directory moves. A regression that
+// reordered these two lines (write after move) survived the whole suite once:
+// every assertion looked at the end state, and the end state is identical.
+test('session log stage: the mapping is persisted before the directory moves', async () => {
+  const home = await makeTempHome('order-')
+  try {
+    const sessionId = 'session-abc12345'
+    const from = join(home.root, 'sessions', '--D-Work--', sessionId)
+    await mkdir(from, { recursive: true })
+    await writeFile(join(from, 'session.jsonl'), '{}\n')
+    const entryDir = join(home.root, 'trash', 't1')
+    await mkdir(entryDir, { recursive: true })
+    const ops = createSessionLogOps({
+      gateway: { async findSessionDir() { return from } },
+      config: {},
+      logger: { warn() {} },
+    })
+    const observed = []
+    const moved = await ops.moveToTrash({ id: sessionId }, entryDir, {
+      beforeMove: async (mapping) => {
+        observed.push({
+          fromStillThere: await stat(mapping.from).then(() => true, () => false),
+          toAlreadyThere: await stat(mapping.to).then(() => true, () => false),
+        })
+      },
+    })
+    assert.deepEqual(observed, [{ fromStillThere: true, toAlreadyThere: false }])
+    assert.equal(await stat(moved.from).then(() => true, () => false), false)
+    assert.equal(await stat(join(moved.to, 'session.jsonl')).then(() => true, () => false), true)
+  } finally {
+    await home.cleanup()
+  }
+})
+
+// A log copy whose header cannot be read has no destination it could ever be
+// restored to. The list must stop offering "restore" and the routes must let
+// the entry be discarded, otherwise retention and manual cleanup both leave it
+// on disk forever.
+test('unrecoverable log: not restorable, and discard is the way out', async () => {
+  const home = await makeTempHome('unreadable-')
+  try {
+    const trashId = 't9-abcd'
+    const entryDir = join(home.root, 'trash', trashId)
+    await mkdir(join(entryDir, 'session'), { recursive: true })
+    await writeFile(join(entryDir, 'session', 'session.jsonl'), 'not a log header\n')
+    const entry = {
+      format: 1,
+      trashId,
+      sessionId: 'session-abc12345',
+      title: 'Unreadable',
+      mode: 'hard',
+      includeMemory: false,
+      status: 'pending',
+      sessionLog: null,
+      catalog: null,
+      memory: { adapters: [], total: 0 },
+    }
+    const captured = new Map([[trashId, entry]])
+    const trash = {
+      calls: [],
+      async read(id) { return captured.get(id) ?? null },
+      entryDir(id) { return join(home.root, 'trash', id) },
+      async remove(id) { captured.delete(id) },
+      async update(id, patch) { Object.assign(captured.get(id), patch) },
+      async allocate() { throw new Error('not used') },
+      async write() { throw new Error('not used') },
+      async list() { return [...captured.values()] },
+    }
+    const ops = {
+      memory: { restoreEntry: async () => {} },
+      sessionLog: { restoreEntry: async () => {} },
+      catalog: { restore: async () => async () => {} },
+      session: { inspect: async () => null },
+      lifecycle: { quiesce: async () => async () => {} },
+      pathExists: async (target) => stat(target).then(() => true, () => false),
+      hasFiles: async (target) => (await readdir(target).catch(() => [])).length > 0,
+      recoverSessionLog: async () => null,
+      isInsideSessionsRoot: () => true,
+      isInsideTrashDir: () => true,
+    }
+    const capabilities = entryCapabilities(entry, {
+      hasLogFiles: true,
+      hasMemoryFiles: false,
+      payloadRecoverable: false,
+      requirePayload: true,
+    })
+    assert.equal(capabilities.canRestore, false)
+    assert.equal(capabilities.canDiscard, true)
+    await assert.rejects(
+      performRestore({ entry, ops, trash, audit: makeAudit() }),
+      (error) => error.code === 'E_TRASH_CONFLICT' && /cannot be read/.test(error.message),
+    )
+    await performDiscard({ entry, ops, trash, audit: makeAudit() })
+    assert.equal(captured.has(trashId), false)
+  } finally {
+    await home.cleanup()
+  }
 })
