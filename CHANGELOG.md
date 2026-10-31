@@ -3,6 +3,28 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.15] — 2026-10-31
+
+dsh-go（Android）适配性审计后的修复。审计结论：Host 半边开箱可用（手机里跑的是真 Node 24 + 原版 DSH 引擎），问题全在**前端座位**与**移动端输入**上。
+
+### Fixed
+
+- **原生界面里删除按钮全都没有反应**（dsh-go 侧 `shell.overlay` 是 opt-in 座位，确认框宿主不挂载）：新增 `useInlineDialogState()`，检测到 overlay 宿主没有挂载时，把**同一个确认框内联**渲染在设置页「批量删除」标签页里。桌面端/网页端有座位时行为不变（`overlaySeatMounted` 标记 + 500ms 宽限，避免闪一下内联副本）。
+- **`DELETE` 短语在手机上永远对不上**：Android 输入法会把首字母大写，`purgePhrase.trim() !== 'DELETE'` 于是让按钮永久灰掉、没有任何提示。现在 Client 的 `phraseMatches()` 与 Host 的 `deletePlan`/`purgeEntry`/`discardEntry` 三处比对都**忽略大小写并去空格**；三个输入框补 `autoCapitalize`/`autoCorrect`/`spellCheck`（计数短语用 `inputMode: 'numeric'`）。
+- **非 JSON 拒绝被报成「无法解析的响应」**：dsh-go 的 `route-guard.diff` 在插件路由之前返回 `text/plain` 401/503。新增 `httpFallbackError(response)`，按状态码映射成 `E_UNAUTHORIZED`/`E_DISABLED`/`E_BAD_RESPONSE`，并在响应头带 `x-dsh-go-guard: reject` 时把原因写进文案（"dsh-go route guard"）。
+- **`E_LOCK_BUSY` 是死胡同**：错误信息补上锁文件路径与"持续出现就删掉它"的指引，`details.lockPath` 一并返回（手机被杀进程后残留锁最长阻塞 20 分钟，用户此前没有任何自救手段）。
+
+### Changed
+
+- 回收站横幅文案补充「清理只在 Host 运行时发生」：App 关闭期间清扫不执行，下次启动补扫。
+- README 新增 §8.1「dsh-go（Android）适配」：网页模式/原生界面的差异、opt-in 座位导致的降级路径、市场默认隐藏 web-only 插件需点「显示网页版插件」、DSH Remote 无网页版。
+
+### Tests
+
+- `test/client-module.test.mjs`（25 → 28）：短语忽略大小写与空期望值；非 JSON 拒绝按状态码映射（含 `x-dsh-go-guard` 分支）；**没有 overlay 座位时设置页把同一个确认框内联渲染**（无 payload 时不渲染空壳，有 payload 时挂上真正的 `DeleteDialog` 并给出原因提示）。
+- `test/api.test.mjs`（63 → 64）：`DELETE` 短语大小写不敏感（`Delete me` 仍 400 `E_CONFIRM_PHRASE`，`delete` 通过）。
+- 合计 188 → **192**（干净树 `rm -rf test/.tmp` 后全绿）。
+
 ## [0.3.14] — 2026-10-30
 
 第二轮独立审计（架构 / 安全 / 验收各跑 186 条、并做了变异测试与真实探针）之后的修复：一条会**删掉唯一副本**的读盘失败被当成「空目录」，一条会把用户**刚恢复的对话**再删一次，还有一类条目**三条出路全拒**却仍在 UI 上提供「恢复」按钮。

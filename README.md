@@ -247,6 +247,28 @@ npm run check   # 语法 + manifest
 
 ---
 
+## 8.1 dsh-go（Android）适配
+
+[dsh-go](https://github.com/ccch1mneyyy/dsh-Go) 的 App 里跑的是**真正的 Node 24 + 原版 DSH 引擎**（PRoot 内 Ubuntu），所以 Host 半边零改动即可运行：`engines.node >= 22.15`、`engines.dsh >= 0.2.1-rc.2` 双向满足，`market/policy.json` 也不拦第三方包。差异全在**前端座位**上：
+
+| 界面 | 结果 |
+|---|---|
+| **网页模式**（App 内 DSH 网页版 / SSH 主机） | 完整可用，四个槽位都在 |
+| **原生界面** | 插件能装、设置页有整页岛（回收站可看、可恢复、可彻底清除）；会话行菜单与顶栏入口**没有座位**，因此删除走设置页「批量删除」标签页 |
+
+原生界面里 `shell.overlay` 是 opt-in 座位（`slot_catalog.dart` 的 `SeatPolicy.p2Overlay`），确认框的宿主因此不会挂载。0.3.15 起做了两件事：
+
+1. **降级渲染**：检测到 overlay 宿主没有挂载时，设置页把**同一个确认框内联**渲染在「批量删除」标签页里（`client.js` 的 `useInlineDialogState`），不再出现"点了删除没反应"。
+2. **移动端输入**：短语输入框加 `autoCapitalize/autoCorrect/spellCheck`，并且 Host 与 Client 的短语比对都改成**忽略大小写**（Android 输入法会把 `DELETE` 写成 `Delete`）。
+
+另外两件与手机有关的事，写在文档里而不是藏起来：
+
+- **市场默认隐藏 web-only 插件**：安装前要在插件市场点一次「显示网页版插件」。
+- **保留期清理只在 Host 运行时发生**：`trashRetentionDays`（默认 30 天）的清扫由宿主进程驱动，App 被杀掉期间不会执行，下次启动时补扫；`0` 关闭。
+- **DSH Remote（远程桥）没有网页版**，因此插件在那里没有 UI；SSH 主机可以用网页模式。
+
+---
+
 ## 9. 反馈通道（设置页「反馈」按钮）
 
 设置页**最上方**新增一条「反馈」横幅（主色按钮，位于标题之上）：把问题或建议写成一条消息，由**宿主进程**通过邮件发到维护者邮箱。凭证只在宿主侧读取，页面拿不到、也发不出任何邮件。

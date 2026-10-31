@@ -1813,3 +1813,40 @@ test('confirmation: a failed plan leaves the token usable for the retry', async 
     await fixture.home.cleanup()
   }
 })
+
+// Android soft keyboards capitalise the first letter: a user who types "Delete"
+// has done what the prompt asked and must not be stuck on a dead button.
+test('confirmation: the typed DELETE phrase is matched case-insensitively', async () => {
+  const fixture = await makeFixture()
+  try {
+    // Seed a committed deletion directly: the phrase gate is what this test is
+    // about, not the preview/confirm dance in front of it.
+    const trashId = `seed${Date.now().toString(36)}-ci`
+    const seedDir = join(fixture.paths.trashDir, trashId)
+    await mkdir(seedDir, { recursive: true })
+    await writeFile(join(seedDir, 'manifest.json'), JSON.stringify({
+      format: 1,
+      trashId,
+      sessionId: S1,
+      title: 'case test',
+      mode: 'hard',
+      includeMemory: false,
+      deletedAt: Date.now(),
+      createdAt: Date.now(),
+      status: 'trashed',
+      sessionLog: { sessionId: S1, from: join(fixture.paths.sessionsRoot, 'proj', S1), to: join(seedDir, 'session') },
+      catalog: null,
+      memory: { adapters: [], total: 0 },
+    }), 'utf8')
+
+    const wrong = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'Delete me' } })
+    assert.equal(wrong.status, 400)
+    assert.equal(wrong.body.error.code, 'E_CONFIRM_PHRASE')
+
+    const accepted = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'delete' } })
+    assert.equal(accepted.status, 200)
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})

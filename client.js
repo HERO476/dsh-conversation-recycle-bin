@@ -112,7 +112,7 @@ window.__ModuleLoader__.load({
         'trash.title': 'Recycle bin',
         'trash.empty': 'The recycle bin is empty.',
         'trash.deletedAt': 'Deleted {time}',
-        'trash.retention': 'Entries are purged automatically {days} days after deletion. Set trashRetentionDays to 0 to keep them until you purge them yourself.',
+        'trash.retention': 'Entries are purged automatically {days} days after deletion, but only while the Host is running (a phone with the app closed simply sweeps on the next launch). Set trashRetentionDays to 0 to keep them until you purge them yourself.',
         'trash.expiresIn': 'auto-purged in {days} d',
         'trash.expiresSoon': 'auto-purged on the next check',
         'trash.swept': 'The Host cleaned up {count} expired entries in the background.',
@@ -219,6 +219,7 @@ window.__ModuleLoader__.load({
         'error.E_QUEUE_TIMEOUT': 'The Host was still busy with another change, so this request was not applied. Retry in a moment.',
         'error.E_ABANDONED': 'The page gave up waiting before the Host started; nothing was changed. Retry.',
         'error.E_UNAUTHORIZED': 'This request is not authenticated with the Host.',
+        'dialog.inlineHint': 'This window has no overlay slot (dsh-go native UI), so the confirmation is shown here instead of in a popup.',
         'adapter.lingshu': 'Lingshu cognitive graph (md_cg)',
         'adapter.generic-json': 'Generic JSON memory store',
         'adapter.none': 'No memory store',
@@ -274,7 +275,7 @@ window.__ModuleLoader__.load({
         'trash.title': '回收站',
         'trash.empty': '回收站为空。',
         'trash.deletedAt': '删除于 {time}',
-        'trash.retention': '条目在删除 {days} 天后自动清理。把 trashRetentionDays 设为 0 可改为一直保留、由你自己彻底删除。',
+        'trash.retention': '条目在删除 {days} 天后自动清理，但清理只在 Host 运行时发生（手机 App 关闭期间不会执行，下次启动时补扫）。把 trashRetentionDays 设为 0 可改为一直保留、由你自己彻底删除。',
         'trash.expiresIn': '{days} 天后自动清理',
         'trash.expiresSoon': '下次检查时自动清理',
         'trash.swept': 'Host 已在后台自动清理 {count} 条过期条目。',
@@ -381,6 +382,7 @@ window.__ModuleLoader__.load({
         'error.E_QUEUE_TIMEOUT': '宿主还在处理另一个变更，这次请求没有执行，请稍后重试。',
         'error.E_ABANDONED': '页面在宿主开始处理前就放弃了等待，本次没有做任何改动，请重试。',
         'error.E_UNAUTHORIZED': '该请求未通过宿主的鉴权。',
+        'dialog.inlineHint': '当前窗口没有 overlay 槽位（dsh-go 原生界面），确认框直接显示在这里。',
         'adapter.lingshu': '灵枢认知图 (md_cg)',
         'adapter.generic-json': '通用 JSON 记忆存储',
         'adapter.none': '无记忆存储',
@@ -552,6 +554,48 @@ window.__ModuleLoader__.load({
       return new URL(`${API_PREFIX.replace(/^\//, '')}${path}`, base)
     }
 
+    /**
+     * Does the typed phrase match what the Host asked for?
+     *
+     * Trimmed and case-insensitive on purpose: Android soft keyboards capitalise
+     * the first letter of a word, so `Delete` reached a check that only accepted
+     * `DELETE` and the confirm button stayed disabled with no explanation. The
+     * phrase exists to make the user think, not to test their keyboard.
+     */
+    function phraseMatches(input, expected) {
+      const want = String(expected ?? '').trim()
+      if (want === '') return true
+      return String(input ?? '').trim().toUpperCase() === want.toUpperCase()
+    }
+
+    /**
+     * Explain a refusal that never reached the plugin route.
+     *
+     * The dsh-go Host guard (and any reverse proxy in front of DSH) answers with
+     * `text/plain`, so `response.json()` threw and the panel showed "unreadable
+     * response" where the real answer was "not authenticated".
+     */
+    function httpFallbackError(response) {
+      const status = Number(response?.status)
+      let guarded = false
+      try {
+        guarded = response?.headers?.get?.('x-dsh-go-guard') === 'reject'
+      } catch {
+        guarded = false
+      }
+      if (status === 401 || status === 403) {
+        return new ApiError('E_UNAUTHORIZED', guarded
+          ? 'The Host rejected this request before the plugin saw it (dsh-go route guard): the page is not authenticated.'
+          : 'This request is not authenticated with the Host.', { status })
+      }
+      if (status === 503) {
+        return new ApiError('E_DISABLED', guarded
+          ? 'The Host route guard has no connection service yet; retry once the app has finished starting.'
+          : 'The plugin is disabled, or the Host is not ready yet.', { status })
+      }
+      return new ApiError('E_BAD_RESPONSE', `The Host answered ${Number.isFinite(status) ? status : 'an unexpected status'} without a JSON body.`, { status })
+    }
+
     async function api(path, options = {}) {
       const method = options.method ?? 'GET'
       const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : REQUEST_TIMEOUT_MS
@@ -575,7 +619,9 @@ window.__ModuleLoader__.load({
           payload = null
         }
         if (payload === null || typeof payload !== 'object') {
-          throw new ApiError('E_BAD_RESPONSE', 'The Host returned an unreadable response.')
+          // A refusal that never reached the plugin route (Host route guard,
+          // reverse proxy, HTML error page) still has a status worth explaining.
+          throw httpFallbackError(response)
         }
         // A batch that partially succeeded is a RESULT, not a refusal: an older
         // Host marked it `ok:false` without an `error`, which made the Client
@@ -642,6 +688,38 @@ window.__ModuleLoader__.load({
       const [state, setState] = useState(dialogStore.state)
       useEffect(() => dialogStore.subscribe(setState), [])
       return state
+    }
+
+    /**
+     * Whether the `shell.overlay` slot actually gave us a seat.
+     *
+     * On DSH for desktop/web it always does. On dsh-go's native UI the overlay
+     * seat is opt-in (`SeatPolicy.p2Overlay`, `optIn: true` in
+     * `slot_catalog.dart`), so the host component never mounts — and with it the
+     * only confirmation dialog the delete flow had. Settings still gets a page
+     * island, so the panel can render that same dialog inline instead of
+     * pretending the button did nothing.
+     */
+    let overlaySeatMounted = false
+
+    function useOverlaySeatPresent() {
+      const [present, setPresent] = useState(overlaySeatMounted === true)
+      useEffect(() => {
+        // The overlay host mounts after the slot service resolves; a single
+        // frame of grace avoids flashing the inline copy on hosts that do have
+        // a seat.
+        const timer = setTimeout(() => setPresent(overlaySeatMounted === true), 500)
+        return () => clearTimeout(timer)
+      }, [])
+      return present
+    }
+
+    function useInlineDialogState() {
+      const payload = useDialogState()
+      const overlayPresent = useOverlaySeatPresent()
+      if (overlayPresent || payload === null) return null
+      // Feedback has no delete semantics and lives in its own tab.
+      return payload.kind === 'feedback' ? null : payload
     }
 
     /**
@@ -1090,7 +1168,7 @@ window.__ModuleLoader__.load({
       const blocked = Array.isArray(preview?.blocked) ? preview.blocked : []
       const confirmation = preview?.confirmation ?? null
       const expectedPhrase = confirmation?.phrase ?? ''
-      const phraseOk = expectedPhrase === '' || phrase.trim() === expectedPhrase
+      const phraseOk = phraseMatches(phrase, expectedPhrase)
       const memory = preview?.memory ?? null
       const memorySupported = memory !== null && memory.enabled === true
         && Array.isArray(memory.adapters) && memory.adapters.some((adapter) => adapter.available === true)
@@ -1267,6 +1345,12 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 autoFocus: true,
                 className: 'dc-input',
+                // The phrase is a count on a phone: no autocorrect, no
+                // sentence capitalisation, digits where digits are expected.
+                inputMode: 'numeric',
+                autoCorrect: 'off',
+                autoCapitalize: 'off',
+                spellCheck: false,
               }))
             : null,
 
@@ -1480,6 +1564,12 @@ window.__ModuleLoader__.load({
     function DialogHost() {
       const payload = useDialogState()
       const flash = useFlashMessage()
+      useEffect(() => {
+        overlaySeatMounted = true
+        return () => {
+          overlaySeatMounted = false
+        }
+      }, [])
       // `kind` is optional: every pre-0.2.2 caller opens a delete dialog, so a
       // payload without a kind keeps its old meaning.
       const dialog = payload === null
@@ -1595,10 +1685,16 @@ window.__ModuleLoader__.load({
                       placeholder: 'DELETE',
                       className: 'dc-input dc-input-small',
                       onChange: (event) => onPhrase(event.target.value),
+                      // Without this Android capitalises the first letter and
+                      // writes `Delete`; the guard above is case-insensitive now,
+                      // but the keyboard should stop guessing anyway.
+                      autoCapitalize: 'characters',
+                      autoCorrect: 'off',
+                      spellCheck: false,
                     }),
                     h(Button, {
                       variant: 'danger',
-                      disabled: discardBusyId === entry.trashId || discardPhrase.trim() !== 'DELETE',
+                      disabled: discardBusyId === entry.trashId || phraseMatches(discardPhrase, 'DELETE') !== true,
                       onClick: () => onDiscard(entry.trashId),
                     }, t('trash.discard')),
                     h(Button, { disabled: discardBusyId === entry.trashId, onClick: onCancel }, t('action.cancel')))
@@ -1640,6 +1736,7 @@ window.__ModuleLoader__.load({
     function SettingsSection() {
       useLocaleTick()
       const mutationVersion = useMutationVersion()
+      const inlineDialog = useInlineDialogState()
       const [tab, setTab] = useState('trash')
       const [state, setState] = useState(null)
       const [sessions, setSessions] = useState([])
@@ -1966,10 +2063,13 @@ window.__ModuleLoader__.load({
                   h('input', {
                     type: 'text', value: purgePhrase, placeholder: 'DELETE', className: 'dc-input dc-input-small',
                     onChange: (event) => setPurgePhrase(event.target.value),
+                    autoCapitalize: 'characters',
+                    autoCorrect: 'off',
+                    spellCheck: false,
                   }),
                   h(Button, {
                     variant: 'danger',
-                    disabled: purgeBusy === true || purgePhrase.trim() !== 'DELETE',
+                    disabled: purgeBusy === true || phraseMatches(purgePhrase, 'DELETE') !== true,
                     onClick: () => { void purge(entry.trashId, purgePhrase.trim()) },
                   }, t('action.purge')),
                   h(Button, { disabled: purgeBusy === true, onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
@@ -2033,7 +2133,14 @@ window.__ModuleLoader__.load({
                 // without the source the two are indistinguishable in the UI.
                 + (typeof record.source === 'string' && record.source !== 'web-ui' ? ` · ${record.source}` : '')
                 + (record.error?.message ? ` · ${record.error.message}` : ''))),
-            h('div', { className: 'dc-row-time' }, record.actor ?? '')))) : null)
+            h('div', { className: 'dc-row-time' }, record.actor ?? '')))) : null,
+
+        // dsh-go's native UI gives `shell.overlay` no seat by default, so the
+        // dialog host never mounts there and every delete button looked dead.
+        // The panel keeps its own seat, so it renders the same dialog inline.
+        inlineDialog === null ? null : h('div', { className: 'dc-inline-dialog' },
+          h('p', { className: 'dc-hint' }, t('dialog.inlineHint')),
+          h(DeleteDialog, { payload: inlineDialog, key: `inline:${inlineDialog.key ?? ''}` })))
     }
 
     /* ------------------------------------------------------------------ *
@@ -2044,6 +2151,11 @@ window.__ModuleLoader__.load({
 /* 1300 clears the settings modal (1000) and the host panels that also use
    1100, since this backlog shares document.body with them. */
 .dc-backdrop{position:fixed;inset:0;z-index:1300;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.38);padding:16px}
+/* Inline copy for hosts without an overlay seat (dsh-go native UI): the
+   same dialog, in the page flow instead of on top of it. */
+.dc-inline-dialog{margin-top:14px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb)}
+.dc-inline-dialog .dc-backdrop{position:static;inset:auto;z-index:auto;background:none;padding:0;display:block}
+.dc-inline-dialog .dc-dialog{width:100%;max-width:none;max-height:none;box-shadow:none;padding:14px}
 .dc-dialog{box-sizing:border-box;width:min(560px,94vw);max-height:88vh;overflow:auto;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1f2329);border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.28);padding:20px 20px 16px;font:inherit}
 .dc-dialog-title{margin:0 0 8px;font-size:16px;font-weight:600;line-height:1.4}
 .dc-dialog-body{margin:0 0 12px;font-size:13px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.6}
@@ -2232,6 +2344,12 @@ window.__ModuleLoader__.load({
     exports.__adapterLabel = adapterLabel
     exports.__adapterReason = adapterReason
     exports.__loadUiFlags = loadUiFlags
+    // Pure helpers the tests assert on directly: the phrase rule and the
+    // non-JSON fallback are exactly where a mobile keyboard or a route
+    // guard changes the outcome.
+    exports.__phraseMatches = phraseMatches
+    exports.__httpFallbackError = httpFallbackError
+    exports.__overlaySeatState = () => ({ mounted: overlaySeatMounted })
     return module.exports
   },
 })

@@ -856,3 +856,100 @@ test('client module: the retention notice reads the field the Host actually send
     { days: 0, daysLeft: null },
   )
 })
+
+// A phone keyboard capitalises the first letter of what you type, so the phrase
+// prompt has to be a deliberate friction, not a spelling test.
+test('client module: the confirmation phrase ignores case and surrounding space', async () => {
+  const { exported } = await loadClient()
+  const matches = exported.__phraseMatches
+  assert.equal(matches('DELETE', 'DELETE'), true)
+  assert.equal(matches('delete', 'DELETE'), true)
+  assert.equal(matches('  Delete  ', 'DELETE'), true)
+  assert.equal(matches('2', '2'), true)
+  assert.equal(matches('Delete me', 'DELETE'), false)
+  assert.equal(matches('', 'DELETE'), false)
+  // No phrase required (hard delete of a single conversation): always satisfied.
+  assert.equal(matches('', ''), true)
+  assert.equal(matches('anything', ''), true)
+})
+
+// dsh-go's route guard answers `text/plain` before the plugin route runs. The
+// panel used to show "unreadable response" where the real answer was "the page
+// is not authenticated".
+test('client module: a non-JSON refusal is explained by its status code', async () => {
+  const { exported } = await loadClient()
+  const fallback = exported.__httpFallbackError
+  const guarded = { status: 401, headers: { get: (name) => (name === 'x-dsh-go-guard' ? 'reject' : null) } }
+  const unauth = fallback(guarded)
+  assert.equal(unauth.code, 'E_UNAUTHORIZED')
+  assert.match(unauth.message, /dsh-go route guard/)
+
+  const plainUnauth = fallback({ status: 401, headers: { get: () => null } })
+  assert.equal(plainUnauth.code, 'E_UNAUTHORIZED')
+  assert.doesNotMatch(plainUnauth.message, /dsh-go/)
+
+  const notReady = fallback({ status: 503, headers: { get: () => 'reject' } })
+  assert.equal(notReady.code, 'E_DISABLED')
+  assert.match(notReady.message, /connection service/)
+
+  const weird = fallback({ status: 418, headers: { get: () => null } })
+  assert.equal(weird.code, 'E_BAD_RESPONSE')
+  assert.match(weird.message, /418/)
+})
+
+// dsh-go's native UI never mounts the overlay host, so the confirmation has to
+// come from somewhere else. The settings panel renders the same dialog inline
+// instead of leaving a delete button that appears to do nothing.
+test('client module: without an overlay seat the settings panel carries the dialog', async () => {
+  const { exported } = await loadClient()
+  const { dialogStore } = exported.__store
+  const SettingsSection = exported.__components.SettingsSection
+  const flatten = (node, out = []) => {
+    if (node === null || node === undefined || node === false) return out
+    if (Array.isArray(node)) {
+      for (const child of node) flatten(child, out)
+      return out
+    }
+    if (typeof node === 'object') {
+      out.push(node)
+      flatten(node.children, out)
+      flatten(node.props?.children, out)
+    }
+    return out
+  }
+
+  // No payload: the panel must not render an empty dialog shell.
+  const idle = flatten(SettingsSection({}))
+  assert.equal(idle.some((node) => node?.props?.className === 'dc-inline-dialog'), false)
+
+  dialogStore.open({ sessionIds: ['session-inline01'], displayTitle: '', key: 'inline-test' })
+  try {
+    const rendered = flatten(SettingsSection({}))
+    const wrapper = rendered.find((node) => node?.props?.className === 'dc-inline-dialog')
+    assert.ok(wrapper !== undefined, 'the inline dialog wrapper should render')
+    // The real dialog component travels with it, not a placeholder. (Its body
+    // only appears after its own preview request resolves, which the inert
+    // render pass never does — so the assertion is that the component itself is
+    // mounted here rather than on the overlay seat.)
+    assert.ok(
+      rendered.some((node) => typeof node?.type === 'function' && node.type.name === 'DeleteDialog'),
+      'the dialog component should be mounted inline',
+    )
+    assert.equal(exported.__overlaySeatState().mounted, false, 'no overlay seat was mounted in this render')
+    const strings = []
+    const collect = (node) => {
+      if (typeof node === 'string') { strings.push(node); return }
+      if (node === null || node === undefined || node === false || typeof node !== 'object') return
+      if (Array.isArray(node)) { for (const child of node) collect(child); return }
+      collect(node.children)
+      collect(node.props?.children)
+    }
+    collect(wrapper)
+    assert.ok(
+      strings.some((text) => /overlay slot|槽位/.test(text)),
+      `the hint should explain why the dialog is inline, got: ${JSON.stringify(strings).slice(0, 300)}`,
+    )
+  } finally {
+    dialogStore.close()
+  }
+})
