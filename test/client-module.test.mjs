@@ -953,3 +953,35 @@ test('client module: without an overlay seat the settings panel carries the dial
     dialogStore.close()
   }
 })
+
+// The feedback form is opened from the settings panel itself, so it is the
+// second dialog that must not depend on the overlay seat.
+test('client module: without an overlay seat the feedback dialog is inline too', async () => {
+  const { exported } = await loadClient()
+  const { dialogStore } = exported.__store
+  const SettingsSection = exported.__components.SettingsSection
+  const find = (node, predicate, out = []) => {
+    if (node === null || node === undefined || node === false) return out
+    if (Array.isArray(node)) {
+      for (const child of node) find(child, predicate, out)
+      return out
+    }
+    if (typeof node !== 'object') return out
+    if (predicate(node)) out.push(node)
+    find(node.children, predicate, out)
+    find(node.props?.children, predicate, out)
+    return out
+  }
+  const isNamed = (name) => (node) => typeof node?.type === 'function' && node.type.name === name
+
+  dialogStore.open({ kind: 'feedback', key: 'feedback', version: '0.3.16', feedback: null })
+  try {
+    const rendered = SettingsSection({})
+    const wrapper = find(rendered, (node) => node?.props?.className === 'dc-inline-dialog')[0]
+    assert.ok(wrapper !== undefined, 'the inline wrapper should render for feedback too')
+    assert.ok(find(rendered, isNamed('FeedbackDialog')).length > 0, 'FeedbackDialog should be mounted inline')
+    assert.equal(find(rendered, isNamed('DeleteDialog')).length, 0, 'the delete dialog must not stand in for feedback')
+  } finally {
+    dialogStore.close()
+  }
+})

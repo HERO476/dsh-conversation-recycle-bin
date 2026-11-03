@@ -705,11 +705,27 @@ window.__ModuleLoader__.load({
     function useOverlaySeatPresent() {
       const [present, setPresent] = useState(overlaySeatMounted === true)
       useEffect(() => {
-        // The overlay host mounts after the slot service resolves; a single
-        // frame of grace avoids flashing the inline copy on hosts that do have
-        // a seat.
-        const timer = setTimeout(() => setPresent(overlaySeatMounted === true), 500)
-        return () => clearTimeout(timer)
+        if (overlaySeatMounted === true) {
+          setPresent(true)
+          return undefined
+        }
+        // The overlay host mounts with the shell, but nothing guarantees it is
+        // already there when this panel first renders: poll briefly so a late
+        // mount still wins over the inline copy instead of rendering both.
+        let timer = null
+        const tick = () => {
+          if (overlaySeatMounted !== true) return
+          if (timer !== null) clearInterval(timer)
+          setPresent(true)
+        }
+        timer = setInterval(tick, 250)
+        const stop = setTimeout(() => {
+          if (timer !== null) clearInterval(timer)
+        }, 10_000)
+        return () => {
+          if (timer !== null) clearInterval(timer)
+          clearTimeout(stop)
+        }
       }, [])
       return present
     }
@@ -718,8 +734,10 @@ window.__ModuleLoader__.load({
       const payload = useDialogState()
       const overlayPresent = useOverlaySeatPresent()
       if (overlayPresent || payload === null) return null
-      // Feedback has no delete semantics and lives in its own tab.
-      return payload.kind === 'feedback' ? null : payload
+      // Every dialog this plugin opens has to travel through here, not only the
+      // delete one: the feedback form is opened from this very panel, so
+      // excluding it left a second dead button on hosts without an overlay seat.
+      return payload
     }
 
     /**
@@ -2140,7 +2158,9 @@ window.__ModuleLoader__.load({
         // The panel keeps its own seat, so it renders the same dialog inline.
         inlineDialog === null ? null : h('div', { className: 'dc-inline-dialog' },
           h('p', { className: 'dc-hint' }, t('dialog.inlineHint')),
-          h(DeleteDialog, { payload: inlineDialog, key: `inline:${inlineDialog.key ?? ''}` })))
+          inlineDialog.kind === 'feedback'
+            ? h(FeedbackDialog, { payload: inlineDialog, key: `inline:${inlineDialog.key ?? 'feedback'}` })
+            : h(DeleteDialog, { payload: inlineDialog, key: `inline:${inlineDialog.key ?? ''}` })))
     }
 
     /* ------------------------------------------------------------------ *

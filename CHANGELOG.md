@@ -3,6 +3,33 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.16] — 2026-11-03
+
+一次针对源码本身的复查（逐模块读 Host 半边 + 记忆适配器、`client.js` 相关路径）。两条真缺陷、三处健壮性改进、两处文档不一致。
+
+### Fixed
+
+- **记忆节点的 `nodeId` 能决定文件落点（路径穿越，已复现）**：`nodeId` 是外部记忆库 JSON 的 key（md_cg 的 `_index.json`，或 `memory.generic.indexFile` 指向的任何 JSON），插件此前直接拼成 `${nodeId}.content` 当作回收站里的文件名。一个 `../../../../escaped-node` 的 key 会把内容文件移出 `trash/<id>/memory/<adapter>/files/`，落到磁盘任意可写目录（文件名后缀固定 `.content`）。现在普通 id 保持历史命名（旧 bundle 仍可恢复），任何不是「纯文件名字符集」的 id 改用 `sha256(id)` 前 32 位命名；恢复时 `entry.storedFile` 还必须满足 `basename(x) === x`，否则抛 `E_TRASH_CONFLICT`。
+- **无 overlay 座位时「反馈」仍是死按钮**：0.3.15 的内联确认框把 `kind: 'feedback'` 排除了，而反馈横幅就在同一个设置面板里，于是在 dsh-go 原生界面上点「反馈」什么都不发生。现在内联渲染按 `kind` 分派 `FeedbackDialog` / `DeleteDialog`，两类对话框共用同一条降级路径。
+
+### Changed
+
+- **晚挂载的 overlay 不再导致两个对话框并存**：`useOverlaySeatPresent()` 从「500ms 后查一次」改成「250ms 轮询、最长 10s」，overlay 一旦挂载就让位给真正的宿主。
+- **跨盘移动不再可能留下半个目标**：`moveDirectory()` 的 EXDEV 退路改为「先 `cp` 到目标旁的 `.partial-<pid>-<ts>`，再 `rename` 就位，最后删源」，崩溃时不会出现一个半写目录被后续恢复当成完整日志。
+- **两处读取路径的头部预算统一**：纯文本日志首行从 64 KB 提到与 zstd 路径一致的 256 KB，且「填满预算还没换行」直接判为不可读，不再把一个截断行交给 `JSON.parse`。
+- `writeJsonAtomic()` 改为模块顶部引入 `writeFile`（原来每次调用都 `await import`），rename 失败时清理临时文件。
+
+### Docs
+
+- `README.md` 的状态行从 `0.3.14` 更正到 `0.3.16`（0.3.15 发布时漏改，且已随 npm 包外发）。
+- `cordis.patch.yml` 的默认层补上 `requireConnection: true`：该键此前只存在于 `config.schema.json` 与 `lib/core/config.js` 的 `DEFAULTS`，使「默认层 21 项 / schema 22 项」对不上。
+
+### Tests
+
+- `test/memory.test.mjs`（13 → 15）：恶意 `nodeId` 不能把内容文件搬出 bundle、且事后该文件确实在 `files/` 内；旧式 `<nodeId>.content` bundle 仍可恢复，而 `../../etc/passwd` 形式的 `storedFile` 被拒。
+- `test/client-module.test.mjs`（28 → 29）：无 overlay 座位时反馈对话框走内联路径（挂的是 `FeedbackDialog`，不是 `DeleteDialog`）。
+- 合计 192 → **195**。
+
 ## [0.3.15] — 2026-10-31
 
 dsh-go（Android）适配性审计后的修复。审计结论：Host 半边开箱可用（手机里跑的是真 Node 24 + 原版 DSH 引擎），问题全在**前端座位**与**移动端输入**上。

@@ -395,3 +395,84 @@ test('lingshu adapter: a preview reads the index once, and a rewrite invalidates
     await store.cleanup()
   }
 })
+
+// The node id is a KEY FROM AN EXTERNAL JSON FILE, so it must never be able to
+// choose where a content file lands. `../../x` used to move the file out of the
+// bundle and into an arbitrary directory the Host can write.
+test('memory adapter: a node id cannot escape the restore bundle', async () => {
+  const root = join(process.cwd(), 'test', '.tmp', `md-escape-${Date.now()}`)
+  const store = join(root, 'store')
+  const trashDir = join(root, 'trash', 'entry-1')
+  try {
+    await mkdir(join(store, 'content'), { recursive: true })
+    const evilId = '../../../../escaped-node'
+    await writeFile(join(store, 'content', 'a.md'), 'hello', 'utf8')
+    await writeFile(join(store, '_index.json'), JSON.stringify({
+      schema: 2,
+      nodes: { [evilId]: { session: SESSION_1, path: 'content/a.md' } },
+    }), 'utf8')
+
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'probe',
+      label: 'probe',
+      indexFile: join(store, '_index.json'),
+      rootDir: store,
+      sessionField: 'session',
+      nodesPointer: '/nodes',
+    })
+    const bundle = await adapter.exportSession(SESSION_1, trashDir)
+    assert.equal(bundle.count, 1)
+    const stored = bundle.entries[0].storedFile
+    assert.equal(/[\/]/.test(stored), false, `stored file name must stay a name, got ${stored}`)
+    assert.equal(stored.includes('..'), false)
+
+    // The content file lives inside the bundle's own files/ directory …
+    const files = join(trashDir, 'memory', 'probe', 'files')
+    assert.equal(await readFile(join(files, stored), 'utf8'), 'hello')
+    // … and nothing was written next to the trash entry.
+    await assert.rejects(readFile(join(root, 'trash', 'escaped-node.content'), 'utf8'), /ENOENT/)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
+  }
+})
+
+// Bundles written before the fix name files `<nodeId>.content`, so a plain name
+// must keep restoring; only a name that leaves its directory is refused.
+test('memory adapter: a legacy bundle still restores, a traversing one is refused', async () => {
+  const root = join(process.cwd(), 'test', '.tmp', `md-legacy-${Date.now()}`)
+  const store = join(root, 'store')
+  try {
+    await mkdir(join(store, 'content'), { recursive: true })
+    await writeFile(join(store, '_index.json'), JSON.stringify({ schema: 2, nodes: {} }), 'utf8')
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'probe',
+      label: 'probe',
+      indexFile: join(store, '_index.json'),
+      rootDir: store,
+      sessionField: 'session',
+      nodesPointer: '/nodes',
+    })
+    const bundleDir = join(root, 'bundle')
+    await mkdir(join(bundleDir, 'files'), { recursive: true })
+    await writeFile(join(bundleDir, 'files', 'legacy.content'), 'body', 'utf8')
+    const node = { session: SESSION_1, path: 'content/legacy.md' }
+    const bundle = {
+      format: 1,
+      adapter: 'probe',
+      indexFile: join(store, '_index.json'),
+      rootDir: store,
+      sessionId: SESSION_1,
+      bundlePath: join(bundleDir, 'bundle.json'),
+      count: 1,
+      entries: [{ nodeId: 'legacy', originalPath: 'content/legacy.md', storedFile: 'legacy.content', node }],
+      links: [],
+    }
+    await adapter.restoreBundle(bundle)
+    assert.equal(await readFile(join(store, 'content', 'legacy.md'), 'utf8'), 'body')
+
+    const hostile = { ...bundle, entries: [{ nodeId: 'legacy', originalPath: 'content/legacy2.md', storedFile: '../../etc/passwd', node }] }
+    await assert.rejects(adapter.restoreBundle(hostile), (error) => error.code === 'E_TRASH_CONFLICT')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
+  }
+})
