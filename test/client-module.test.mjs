@@ -567,8 +567,21 @@ test('client: the batch picker disables rows the Host refuses and says why', asy
   const checkbox = blocked.children[0]
   assert.equal(checkbox.props.disabled, true)
   const hint = blocked.children[1].children[1]
-  assert.match(hint.children[0], /无法删除/)
-  assert.match(hint.children[0], /E_POLICY_ORPHAN|不属于任何已登记工作区/)
+  // Locale-aware: the prefix is `batch.notDeletable` in the ACTIVE dictionary.
+  // Hard-coding 无法删除 made this suite fail under LANG=C.UTF-8 (where
+  // navigator.language resolves to en-US) even though the product behaviour was
+  // correct — the test, not the feature, was wrong.
+  assert.ok(
+    String(hint.children[0]).includes(exported.__t('batch.notDeletable')),
+    `row hint should contain the localized prefix: ${String(hint.children[0])}`,
+  )
+  // The row renders `error.E_POLICY_ORPHAN` in the ACTIVE locale, not the
+  // `policy.message` the Host sent (that is the fallback), so the assertion
+  // must resolve through the dictionary instead of pinning one language.
+  assert.ok(
+    String(hint.children[0]).includes(exported.__t('error.E_POLICY_ORPHAN')),
+    `row hint should explain the refusal: ${String(hint.children[0])}`,
+  )
 
   const allowed = exported.__components.BatchSessionRow({
     session: { id: 'session-aaaaaaaa-1111', title: 'Alpha chat', cwd: 'D://Work', updatedAt: Date.now(), deletable: true, policy: { ok: true } },

@@ -30,7 +30,10 @@ test('normalizeConfig: malformed values fall back, security booleans stay safe',
     allowedWorkspaceRoots: ['D:\\Work'],
     memory: { adapters: ['lingshu', 'bogus'], deleteMode: 'burn' },
   })
-  assert.equal(value.enabled, true)
+  // The master switch is fail-closed: `'yes'` is not a canonical boolean, so an
+  // unusable value must not read as "on". Canonical strings ARE parsed, which
+  // is why `stopLiveSessions: 'true'` survives as true.
+  assert.equal(value.enabled, false)
   assert.equal(value.stopLiveSessions, true)
   assert.equal(value.liveDrainMs, 0)
   assert.equal(value.maxBatchSessions, 1)
@@ -79,6 +82,29 @@ test('isPathInside compares Windows paths case-insensitively and by segment', ()
   assert.equal(isPathInside('D:\\Work', 'd:/work/session'), true)
   assert.equal(isPathInside('D:\\Work', 'D:\\Work2\\x'), false)
   assert.equal(isPathInside('D:\\Work', 'D:\\Work'), true)
+})
+
+test('isPathInside folds `.`/`..` and keeps bare roots comparable', () => {
+  // A lexical fence must not be bypassable with `..`: the string prefix of
+  // `/a/b/../../etc` still starts with `/a/b`, so the old raw-prefix check
+  // answered true for a path that escapes the root.
+  assert.equal(isPathInside('/a/b', '/a/b/../../etc'), false)
+  assert.equal(isPathInside('D:\\Work', 'D:\\Work\\..\\etc'), false)
+  assert.equal(isPathInside('//srv/share/a', '//srv/share/a/../b'), false)
+  // A bare root used to be trimmed to '' and failed its own containment test.
+  assert.equal(isPathInside('/', '/a'), true)
+  assert.equal(isPathInside('/a/b/', '/a/b/c'), true)
+  assert.equal(isPathInside('/a/b', '/a/b/../b'), true)
+})
+
+test('config: string booleans are parsed and the master switch is fail-closed', () => {
+  assert.equal(normalizeConfig({}).value.enabled, true)
+  assert.equal(normalizeConfig({ enabled: 'false' }).value.enabled, false)
+  assert.equal(normalizeConfig({ enabled: ' TRUE ' }).value.enabled, true)
+  // An unusable value cannot leave the plugin silently ON when the user tried
+  // to switch it off; every other boolean keeps its safe default.
+  assert.equal(normalizeConfig({ enabled: 'yes' }).value.enabled, false)
+  assert.equal(normalizeConfig({ requireSameOrigin: 'false' }).value.requireSameOrigin, false)
 })
 
 test('policy: refuses protected, orphan, subagent, strict-live and out-of-root sessions', () => {

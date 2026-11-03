@@ -3,6 +3,38 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.17] — 2026-11-03
+
+针对 **dsh 0.2.2-alpha.3** 的适配性评审（安全 / 架构 / 验收三方独立只读复审）后的修复。评审本身的结论是「接口层 0 阻断、运行态未装载、行为层零证据」；这一版把其中所有能在代码里闭合的项做完，**运行态装载与破坏性链路仍需一次重启后的实测**（见 `scripts/verify-host-contract.mjs`）。
+
+### Fixed
+
+- **路径围栏可被 `..` 绕过**（评审已复现）：`isPathInside()` 原来是字符串前缀比较，`/a/b/../../etc` 以 `/a/b` 开头于是判为「在内」。现在先做纯词法段折叠（新增 `collapsePathSegments`，不触碰文件系统、`..` 在根处截断）再按段比较。
+- **裸根不可比较**：`normalizePathForCompare('/')` 曾被 trim 成空串，导致 `isPathInside('/', '/a') === false`；`c:/` 同理。根现在保持为根。
+- **`GET /trash` 带破坏性副作用**：轮询、刷新或预取都可能触发保留期清扫并永久删除用户还想恢复的条目。GET 现在完全无副作用；保留期只由 `lib/index.js` 的定时器（启动后 60s 首扫，之后每 6h）与显式 purge 驱动。
+- **soft 删除的回滚会丢置顶**：宿主 `archiveSession` 在同一写入里清除 pin，而插件 undo 只做 unarchive。回滚现在按快照补 `pinSession`（顺序必须 unarchive → pin，归档态 pin 会抛错）。
+- **1.5s 缓存窗口内 pin 后删除，恢复后不置顶**：`deletePlan` 的 preflight 与 retention 清理都改为先 `gateway.invalidate()` 再读状态，避免用旧快照判定。
+- **投影缓存没有格式断言**：`readSessionProjection` 直接取 `record.rows`，宿主把 version 从 7 提到 8 时会静默错读字段。现在 `document.version !== 7` 一律降级为「无投影」，不再猜字段含义。
+- **宿主 0.2.2+ 已不写 `storages/session_projcache.json`**：批量标题读的正是这个 legacy 根文件，于是列表每行都没有标题。现在按 per-session 投影补齐（16 路并发），legacy 文件仅作旧布局的兼容回退。
+- **`enabled: "false"`（字符串）曾被当成非法值回落到默认 `true`**：主开关改为 fail-closed——可识别的 `"true"/"false"` 正常解析，其余无法识别的值判为关闭，不再出现「用户想关却开着」。
+- **`engines.dsh` 没有上界**：宿主升到 0.3.x 时兼容门仍会无条件放行。改为 `>=0.2.1-rc.2 <0.3.0-0`。
+- **测试在 C locale 下必红，且会短路后续套件**：`client-module` 把中文 `无法删除` 硬编码进断言（`navigator.language` 在 `LANG=C.UTF-8` 下解析为 en-US），而 `npm test` 用 `&&` 串联，第一个文件失败后其余 8 个根本不跑。断言改为按当前 locale 解析，新增 `scripts/run-tests.mjs` 逐个跑完再汇总。
+
+### Added
+
+- `test/contract.test.mjs`：把网关依赖的磁盘形状钉成夹具——投影 v7 能读出标题、v8 降级为无标题、`workspace.json` 的 archived/pinned 两个集合原样读出。
+- `scripts/verify-host-contract.mjs`：对**已启动**的宿主做运行时探针（boot 图是否含插件行、`/api/state` 是否返回 JSON），补上「测试全跑假宿主」这一空白。
+- `AUDIT-*.md` 现在会进 npm 包（此前 `files` 白名单只带 10-17 一份，兼容性证据链随包丢失）。
+
+### Docs
+
+- README 补 4 条已知限制：词法围栏不解析符号链接、保留期清理最多延迟 6 小时、宿主不校验 Origin（鉴权由插件自做）、`manifestVersion`/`config.schema.json` 无消费方。
+
+### Tests
+
+- 新增 5 个用例（`core.test.mjs` 2 + `contract.test.mjs` 3）；`client-module` 两处 locale 断言改为走 `__t()`。
+- `NODE`/`LANG=C.UTF-8` 与 `LANG=zh_CN.UTF-8` 双向各跑一次：10 个文件、**200 个用例全过**。
+
 ## [0.3.16] — 2026-11-03
 
 一次针对源码本身的复查（逐模块读 Host 半边 + 记忆适配器、`client.js` 相关路径）。两条真缺陷、三处健壮性改进、两处文档不一致。

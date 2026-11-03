@@ -2,8 +2,8 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.3.16`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
-> 运行要求：**Node.js ≥ 22.15**（Host 侧用到 `readdir(..., { recursive: true })`、`AbortSignal` 等 22.x 行为），DSH ≥ `0.2.1-rc.2`（`package.json` 的 `engines` 已如实声明，DSH 安装校验会据此拒绝更低版本）。
+> 状态：`0.3.17`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 运行要求：**Node.js ≥ 22.15**（Host 侧用到 `readdir(..., { recursive: true })`、`AbortSignal` 等 22.x 行为），DSH `>=0.2.1-rc.2 <0.3.0-0`（`package.json` 的 `engines.dsh` 已如实声明，DSH 安装校验会据此拒绝范围外版本；上界是刻意的：0.2.2 与 0.3.x 之间没有承诺兼容）。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -216,8 +216,9 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # = manifest && client-module && core && cascade && memory && trash-audit && feedback && api（186 个用例）
+npm test        # 依次跑 test/*.test.mjs（10 个文件、200 个用例）；任一失败仍会跑完全部再汇总
 npm run check   # 语法 + manifest
+node scripts/verify-host-contract.mjs http://127.0.0.1:3082 --token=<token>   # 宿主已启动时的运行时探针（boot 图 + /api/state）
 ```
 
 | 用户要求场景 | 用例 |
@@ -244,6 +245,11 @@ npm run check   # 语法 + manifest
 5. UI 依赖当前版本的 slot 约定；宿主升级若改 slot props，入口会失效但不会破坏宿主。0.1.4 的原地刷新还会调用 `uiWorkspace.clearArchivedCurrent/clearMain`（宿主 `.d.ts` 中标为 private）；两者都不存在时会退回整页刷新，不会留下过期视图，但属于对私有方法的依赖，宿主升级需复核。
 6. 回收站 manifest 的并发写由 `<dataDir>/mutation.lock` 跨进程锁保护（抢不到锁返回 `E_LOCK_BUSY`）；但**会话日志内容**的跨进程写保护仍是 best-effort：`foreignWriterGraceMs` 只能发现"窗口内仍在增长"的日志，另一个 Host 的空闲 live 会话（两次写入之间）无法被本进程识别。桌面端与 `dsh web` 同时运行时，仍应先关闭另一端的会话再彻底删除。
 7. 未完成条目（failed/pending/restoring/purging）若仍持有已移动的会话日志或记忆文件，出于数据安全不允许 `discard`（会报 `E_TRASH_CONFLICT`）；设置页对这类条目提供「恢复」按钮，可直接恢复回会话列表，不再出现"失败了却没有出口"的死条目。日志与记忆都已不在磁盘上的条目才可以 discard。
+
+8. 路径围栏是**词法**判断（折叠 `.`/`..`、按段比较），不解析符号链接；真正的归属权威是宿主的 `workspaceRegistry`，围栏只用于「属于哪个工作区」的展示与删除前提示。若 `workspace.path` 或会话 `cwd` 本身是符号链接，判定结果可能与 `realpath` 不同。
+9. 回收站页面的保留期清理不是即时的：`GET /trash` 无副作用，过期条目由定时器（启动后 60s 首扫、之后每 6h）或用户显式 purge 移除，因此最多可能比 `trashRetentionDays` 多存活 6 小时。
+10. 宿主不校验插件前缀路由的 Origin/CSRF（0.2.2-alpha.3 实测：带 cookie 的跨站请求返回 200），鉴权由插件自己完成——cookie 会话 + 私有请求头 + `requireSameOrigin`。把 Web 暴露到 loopback 之外时必须同时配置 `allowNonLoopback` 与 `allowedHosts`。
+11. `package.json` 的 `dsh.manifestVersion` 与 `config.schema.json` 是文档性声明，当前宿主不读取它们（全仓 grep 零命中）；`engines.dsh` 才是唯一被执行的兼容门。
 
 ---
 
@@ -327,7 +333,7 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
 node test/feedback.test.mjs        # 20 个反馈用例
-npm test                           # 全量 186 个用例
+npm test                           # 全量 200 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'
