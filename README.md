@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.3.17`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.3.18`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 运行要求：**Node.js ≥ 22.15**（Host 侧用到 `readdir(..., { recursive: true })`、`AbortSignal` 等 22.x 行为），DSH `>=0.2.1-rc.2 <0.3.0-0`（`package.json` 的 `engines.dsh` 已如实声明，DSH 安装校验会据此拒绝范围外版本；上界是刻意的：0.2.2 与 0.3.x 之间没有承诺兼容）。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -11,7 +11,7 @@
 
 ## 1. 宿主平台规范确认（第一步）
 
-以下结论来自对当前安装的 DSH `0.2.1-rc.2`（桌面端 desktop profile）的 `cordis_inspect_query` 与实现源码核对，不是假设：
+以下结论来自对当前安装的 DSH `0.2.2-alpha.3`（桌面端 desktop profile；`0.2.1-rc.2` 起成立）的 `cordis_inspect_query` 与实现源码核对，不是假设：
 
 | 项目 | DSH 事实 | 本插件的落点 |
 |---|---|---|
@@ -150,7 +150,36 @@ memory  →  messages  →  session/catalog
       files/<nodeId>.content
 ```
 
-**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），并且**每次打开回收站列表时在后台触发一次**（5 分钟内不重复；列表本身不等清扫，所以锁被占用也不会出现空白页）。只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先，失败按指数退避重试（5 分钟起，上限 6 小时）。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）；`mode: 'soft'` 且会话已被用户复活（未归档）或仍在运行的条目会跳过（无人值守时不去碰正在使用的对话），而仍处于归档状态的 soft 条目会照常清理——soft 删除本身保留日志，不再因为"日志还在"而永久逃过保留期。`trashRetentionDays: 0` 或 `enabled: false` 都会关闭清扫（后者连定时器都不注册，读接口仍然可用），条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条显示 Host 下发的剩余天数，后台刚清过东西时还会提示清了几条。
+**保留期（自动清理）**：`trashRetentionDays`（默认 **30**）现在真的生效 —— Host 每 6 小时清扫一次（启动后 60 秒先扫一次），只有 `status: 'trashed'` 且 `deletedAt` 可解析、且早于 `now - trashRetentionDays` 的条目会被清走，走的是与「永久清除」**完全相同**的 `performPurge` 路径（重新读 manifest、复判 `capabilities.canPurge`、写审计 `action: 'purge'` + `source: 'retention'`），单次最多 20 条、最旧优先，失败按指数退避重试（5 分钟起，上限 6 小时）。`pending`/`restoring`/`restored`/`purging` 与"从未提交"的残留条目**永不自动清**（那是 bug 现场，留给设置页的「恢复」/「discard」出口）；`mode: 'soft'` 且会话已被用户复活（未归档）或仍在运行的条目会跳过（无人值守时不去碰正在使用的对话），而仍处于归档状态的 soft 条目会照常清理——soft 删除本身保留日志，不再因为"日志还在"而永久逃过保留期。`trashRetentionDays: 0` 或 `enabled: false` 都会关闭清扫（后者连定时器都不注册，读接口仍然可用），条目一直留到你自己删。回收站列表里会写明"删除 N 天后自动清理"，每条显示 Host 下发的剩余天数，后台刚清过东西时还会提示清了几条。
+
+### 4.4 配置项全表
+
+`cordis.patch.yml` 的 `config` 段共 22 个键；全部可省略，省略即取默认值。`normalizeConfig` 从不抛错：越界值被钳制、类型错误回落默认，并把每一条修正写进 `/state` 的 `warnings`（`enabled` 例外，它 fail-closed）。
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `enabled` | `true` | 总开关。`false` 时不注册保留期定时器，且所有**写**操作返回 `E_DISABLED`；读接口仍可用，便于查看并手动清理残留条目。 |
+| `requireConnection` | `true` | 必须拿到宿主的 `connection.requestRejection` 才接受路由，否则一律 401 `E_UNAUTHORIZED`。见 §4.2 最后一行。 |
+| `requireSameOrigin` | `true` | 校验 `Origin`/`Sec-Fetch-Site`。 |
+| `allowNonLoopback` | `false` | 跳过 Host 回环校验。**打开它会让 `allowedHosts` 失效**，只在完全信任本机所有进程时使用。 |
+| `allowedHosts` | `[]` | 反代/自定义主机名白名单（`host` 或 `host:port`，最多 32 条）。暴露到 loopback 之外应只配置这一项。 |
+| `allowOrphanSessions` | `false` | 允许删除未登记到任何工作区的会话（默认按 `E_POLICY_ORPHAN` 拒绝）。 |
+| `allowSubagentSessions` | `false` | 允许删除子代理会话（默认按 `E_POLICY_SUBAGENT` 拒绝，避免拆掉正在工作的子会话）。 |
+| `protectedSessionIds` | `[]` | 永不删除、**也不被保留期自动清理**的会话 id 列表。 |
+| `allowedWorkspaceRoots` | `[]` | 非空时，会话的 workspace 路径必须落在其中一个根目录内才允许删除。 |
+| `defaultMode` | `"soft"` | 确认框初始选中的模式。 |
+| `stopLiveSessions` | `true` | `true` 时 hard 删除对 live 会话先走 `quiesce`；`false` 时直接拒绝。 |
+| `liveDrainMs` | `2000` | quiesce 等待 `running=false` 的上限，超时报 `E_POLICY_LIVE` 并回滚。 |
+| `foreignWriterGraceMs` | `1500` | 移动前复检日志 mtime 的窗口；仍在增长则报 `E_POLICY_FOREIGN_WRITER`。 |
+| `trashRetentionDays` | `30` | 回收站保留天数，`0` 关闭清扫（清扫只由定时器驱动，`GET /trash` 无副作用）。 |
+| `maxBatchSessions` | `50` | 单次批量上限；实际值还会被本分钟剩余额度收紧。 |
+| `maxDeletesPerMinute` | `20` | 滑动窗口限流，单删与批量逐项计数。 |
+| `confirmTokenTtlMs` | `120000` | `/preview` 签发的确认 token 有效期（5s–1h）。 |
+| `auditRetentionLines` | `5000` | `audit.jsonl` 保留行数，超出后压缩。 |
+| `auditMaxBytes` | `5242880`（5 MiB） | 审计文件字节上限，超出后压缩（64KB–1GB）。 |
+| `memory` | `enabled:true`、`adapters:["lingshu","generic-json","none"]`、`deleteMode:"trash"` | 记忆适配器段：`enabled`、`adapters`、`lessons`（灵枢）等。 |
+| `ui` | `showRowAction/showHeaderAction/batchDoubleConfirm` 均 `true` | 前端座位开关与批量二次确认。 |
+| `feedback` | 见 §9.2 | 反馈邮件段（非机密）。 |
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 
@@ -248,7 +277,7 @@ node scripts/verify-host-contract.mjs http://127.0.0.1:3082 --token=<token>   # 
 
 8. 路径围栏是**词法**判断（折叠 `.`/`..`、按段比较），不解析符号链接；真正的归属权威是宿主的 `workspaceRegistry`，围栏只用于「属于哪个工作区」的展示与删除前提示。若 `workspace.path` 或会话 `cwd` 本身是符号链接，判定结果可能与 `realpath` 不同。
 9. 回收站页面的保留期清理不是即时的：`GET /trash` 无副作用，过期条目由定时器（启动后 60s 首扫、之后每 6h）或用户显式 purge 移除，因此最多可能比 `trashRetentionDays` 多存活 6 小时。
-10. 宿主不校验插件前缀路由的 Origin/CSRF（0.2.2-alpha.3 实测：带 cookie 的跨站请求返回 200），鉴权由插件自己完成——cookie 会话 + 私有请求头 + `requireSameOrigin`。把 Web 暴露到 loopback 之外时必须同时配置 `allowNonLoopback` 与 `allowedHosts`。
+10. 宿主不校验插件前缀路由的 Origin/CSRF（0.2.2-alpha.3 实测：带 cookie 的跨站请求返回 200），鉴权由插件自己完成——cookie 会话 + 私有请求头 + `requireSameOrigin`。把 Web 暴露到 loopback 之外时用 `allowedHosts` 精确放行（见 §4.2 的反代表）；`allowNonLoopback: true` 会跳过整段 Host 校验、使 `allowedHosts` 失效，只应作为"我完全信任本机所有进程"的显式选择。
 11. `package.json` 的 `dsh.manifestVersion` 与 `config.schema.json` 是文档性声明，当前宿主不读取它们（全仓 grep 零命中）；`engines.dsh` 才是唯一被执行的兼容门。
 
 ---

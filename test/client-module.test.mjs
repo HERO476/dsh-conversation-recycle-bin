@@ -777,7 +777,9 @@ test('client: recycle-bin write budget stays above the Host lock budget', async 
   // E_LOCK_BUSY, or a real result, before the browser aborts.
   const { exported } = await loadClient()
   const budgets = exported.__requestBudgets
-  assert.ok(budgets.trashMutation > 180_000, `trashMutation=${budgets.trashMutation} must exceed the Host 180s lock budget`)
+  // Host budget = 180s lock + 60s queue grace = 240s (published as
+  // `limits.queueTimeoutMs`); the constant is only the cold-start fallback.
+  assert.ok(budgets.trashMutation > 240_000, `trashMutation=${budgets.trashMutation} must exceed the Host 240s queue budget`)
   assert.ok(budgets.trashMutation > budgets.request)
   assert.ok(budgets.mutation >= budgets.request)
 })
@@ -996,5 +998,35 @@ test('client module: without an overlay seat the feedback dialog is inline too',
     assert.equal(find(rendered, isNamed('DeleteDialog')).length, 0, 'the delete dialog must not stand in for feedback')
   } finally {
     dialogStore.close()
+  }
+})
+
+
+test('client: every error code the Host can emit has a message in both locales', async () => {
+  const { ERROR_STATUS } = await import('../lib/core/errors.js')
+  const applyWithLocale = async (localeId) => {
+    const loaded = await loadClient()
+    loaded.exported.apply({
+      slots: {
+        inject(key, callback) { return callback() ?? (() => {}) },
+        register() { return () => {} },
+      },
+      effect(fn) { fn() },
+      get(name) {
+        if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+        return undefined
+      },
+    })
+    return loaded.exported
+  }
+  const codes = Object.keys(ERROR_STATUS)
+  assert.ok(codes.length >= 30, `expected the full error table, got ${codes.length}`)
+  for (const localeId of ['en', 'zh-CN']) {
+    const mod = await applyWithLocale(localeId)
+    for (const code of codes) {
+      const text = mod.__t(`error.${code}`)
+      assert.notEqual(text, `error.${code}`, `${localeId} is missing a message for ${code}`)
+      assert.ok(typeof text === 'string' && text.length > 0, `${localeId}/${code} must be non-empty`)
+    }
   }
 })

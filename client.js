@@ -128,6 +128,8 @@ window.__ModuleLoader__.load({
         'trash.discard': 'Discard',
         'trash.discarded': 'Entry removed.',
         'trash.confirmDiscard': 'Type DELETE to discard this incomplete entry.',
+        'trash.discardForce': 'Discard anyway (drops memory)',
+        'trash.confirmDiscardForce': 'The conversation log cannot be read, so this entry can never be restored. Typing DELETE also deletes the memory bundle it still holds.',
         'trash.status.pending': 'pending',
         'trash.status.failed': 'failed',
         'trash.status.restoring': 'restoring',
@@ -197,6 +199,7 @@ window.__ModuleLoader__.load({
         'error.E_POLICY_LIVE': 'The conversation could not be stopped. Close it and retry.',
         'error.E_POLICY_ORPHAN': 'The conversation is not owned by a registered workspace.',
         'error.E_POLICY_PROTECTED': 'The conversation is protected by configuration.',
+        'error.E_SESSION_ALIVE': 'The conversation is live again (revived or running), so the recycle-bin entry was left untouched.',
         'error.E_POLICY_SUBAGENT': 'Subagent conversations cannot be deleted.',
         'error.E_POLICY_ROOT': 'The conversation is outside the allowed workspace roots.',
         'error.E_RATE_LIMITED': 'Too many deletions; wait a moment and retry.',
@@ -291,6 +294,8 @@ window.__ModuleLoader__.load({
         'trash.discard': '清理',
         'trash.discarded': '条目已清理。',
         'trash.confirmDiscard': '输入 DELETE 清理该未完成条目。',
+        'trash.discardForce': '强制清理（会丢弃记忆）',
+        'trash.confirmDiscardForce': '该条目中的会话日志已无法读取，永远无法恢复。输入 DELETE 会连同它仍保存的记忆一起删除。',
         'trash.status.pending': '待处理',
         'trash.status.failed': '失败',
         'trash.status.restoring': '恢复中断',
@@ -360,6 +365,7 @@ window.__ModuleLoader__.load({
         'error.E_POLICY_LIVE': '无法停止该对话，请关闭后重试。',
         'error.E_POLICY_ORPHAN': '该对话不属于任何已登记工作区。',
         'error.E_POLICY_PROTECTED': '该对话受配置保护。',
+        'error.E_SESSION_ALIVE': '该对话已重新活跃（被恢复或正在运行），回收站条目未做处理。',
         'error.E_POLICY_SUBAGENT': '子代理对话不能删除。',
         'error.E_POLICY_ROOT': '该对话不在允许的工作区根目录内。',
         'error.E_RATE_LIMITED': '删除过于频繁，请稍后重试。',
@@ -491,15 +497,14 @@ window.__ModuleLoader__.load({
     const REQUEST_TIMEOUT_MS = 15_000
     const MUTATION_TIMEOUT_MS = 180_000
     /**
-     * Recycle-bin writes wait for the Host's cross-process lock, and that wait
-     * is unbounded in wall-clock terms: the request queues behind whatever
-     * mutation is already running (`serialize()` chains in-process first). A
-     * 15s budget therefore aborted restore / purge / discard while the Host was
-     * still working, so the UI reported a failure for a change that did happen.
-     * The Host caps its own lock wait at TRASH_LOCK_BUDGET_MS (180s); this sits
-     * just above it so the Host's own answer always wins the race.
+     * Recycle-bin writes wait for the Host's cross-process lock, and the Host's
+     * own budget for that wait is `TRASH_LOCK_BUDGET_MS` (180s) plus the 60s
+     * queue grace, published on `/state` as `limits.queueTimeoutMs` (240s).
+     * This constant is only the fallback for the window before the first
+     * `/state` read lands; it used to be 195s, i.e. 45s SHORTER than the Host,
+     * so the browser aborted an operation the Host went on to complete.
      */
-    const TRASH_MUTATION_TIMEOUT_MS = 195_000
+    const TRASH_MUTATION_TIMEOUT_MS = 245_000
     /**
      * How long a delete may run before the dialog says what it is waiting for.
      * A hard delete of a conversation written moments ago spends
@@ -1663,7 +1668,7 @@ window.__ModuleLoader__.load({
      * log) gets a Restore button: `performDiscard` refuses exactly those
      * entries, so without this the only way out was a manual API call.
      */
-    function IncompleteEntries({ entries, discardTarget, discardPhrase, onPhrase, onStart, onCancel, onDiscard, onRestore, restoreBusyId, discardBusyId = null }) {
+    function IncompleteEntries({ entries, discardTarget, discardPhrase, discardForce = false, onPhrase, onStart, onForceStart, onCancel, onDiscard, onRestore, restoreBusyId, discardBusyId = null }) {
       return h('div', { className: 'dc-panel dc-incomplete' },
         h('div', { className: 'dc-state-title' }, `${t('trash.incompleteTitle')} (${entries.length})`),
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
@@ -1679,6 +1684,14 @@ window.__ModuleLoader__.load({
           const canDiscard = entry.capabilities === undefined
             ? true
             : entry.capabilities?.canDiscard !== false
+          // The one state where the log can never be restored (its header is
+          // unreadable) but a memory bundle still occupies the folder: plain
+          // discard refuses it, restore refuses the log, purge refuses the
+          // status. Offering nothing left the entry on disk forever.
+          const canForceDiscard = entry.capabilities?.canForceDiscard === true
+          const openDiscard = canDiscard === true
+            ? typeof onStart === 'function' ? onStart : null
+            : canForceDiscard && typeof onForceStart === 'function' ? onForceStart : null
           return h('div', { key: entry.trashId, className: 'dc-row' },
             h('div', { className: 'dc-row-main' },
               h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId || entry.trashId),
@@ -1693,7 +1706,7 @@ window.__ModuleLoader__.load({
                   title: t('trash.restoreIncompleteHint'),
                 }, t('action.restore'))
                 : null,
-              canDiscard !== true
+              typeof openDiscard !== 'function'
                 ? null
                 : discardTarget === entry.trashId
                   ? h('span', { className: 'dc-inline-confirm' },
@@ -1714,12 +1727,13 @@ window.__ModuleLoader__.load({
                       variant: 'danger',
                       disabled: discardBusyId === entry.trashId || phraseMatches(discardPhrase, 'DELETE') !== true,
                       onClick: () => onDiscard(entry.trashId),
-                    }, t('trash.discard')),
+                    }, discardForce === true ? t('trash.discardForce') : t('trash.discard')),
                     h(Button, { disabled: discardBusyId === entry.trashId, onClick: onCancel }, t('action.cancel')))
                   : h(Button, {
-                    onClick: () => onStart(entry.trashId),
-                    title: t('trash.confirmDiscard'),
-                  }, t('trash.discard')))
+                    variant: canDiscard === true ? undefined : 'danger',
+                    onClick: () => openDiscard(entry.trashId),
+                    title: canDiscard === true ? t('trash.confirmDiscard') : t('trash.confirmDiscardForce'),
+                  }, canDiscard === true ? t('trash.discard') : t('trash.discardForce')))
           )
         }))
     }
@@ -1775,6 +1789,7 @@ window.__ModuleLoader__.load({
       const [purgePhrase, setPurgePhrase] = useState('')
       const [discardTarget, setDiscardTarget] = useState(null)
       const [discardPhrase, setDiscardPhrase] = useState('')
+      const [discardForce, setDiscardForce] = useState(false)
       const [restoreBusyId, setRestoreBusyId] = useState(null)
       const [purgeBusy, setPurgeBusy] = useState(false)
       const [discardBusyId, setDiscardBusyId] = useState(null)
@@ -1866,14 +1881,26 @@ window.__ModuleLoader__.load({
         for (const name of which) loadedRef.current[name] = -1
       }, [])
 
+      /**
+       * The Host's published budget for one trash mutation (lock + queue grace).
+       * Using the published number keeps the browser from aborting 60s before
+       * the Host gives up; the constant is a cold-start fallback only.
+       */
+      function trashTimeoutMs() {
+        const published = Number(state?.limits?.queueTimeoutMs)
+        return Number.isFinite(published) && published > 0 ? Math.max(1_000, published) : TRASH_MUTATION_TIMEOUT_MS
+      }
+
       async function restore(trashId) {
+        if (restoreBusyId !== null) return
+        setRestoreBusyId(trashId)
         setError(null)
         const entry = trash.find((item) => item.trashId === trashId)
         try {
           await api('/trash/restore', {
             method: 'POST',
             body: { trashId },
-            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+            timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.restored'))
           markStale('trash', 'batch')
@@ -1885,6 +1912,8 @@ window.__ModuleLoader__.load({
           })
         } catch (caught) {
           setError(caught)
+        } finally {
+          setRestoreBusyId(null)
         }
       }
 
@@ -1901,7 +1930,7 @@ window.__ModuleLoader__.load({
           await api('/trash/restore', {
             method: 'POST',
             body: { trashId },
-            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+            timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.restored'))
           markStale('trash', 'batch')
@@ -1929,7 +1958,7 @@ window.__ModuleLoader__.load({
           await api('/trash/purge', {
             method: 'POST',
             body: { trashId, confirmPhrase: phrase },
-            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+            timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.purged'))
           setPurgeTarget(null)
@@ -1949,15 +1978,15 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function discard(trashId, phrase) {
+      async function discard(trashId, phrase, force = false) {
         if (discardBusyId !== null) return
         setDiscardBusyId(trashId)
         setError(null)
         try {
           await api('/trash/discard', {
             method: 'POST',
-            body: { trashId, confirmPhrase: phrase },
-            timeoutMs: TRASH_MUTATION_TIMEOUT_MS,
+            body: { trashId, confirmPhrase: phrase, force: force === true },
+            timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.discarded'))
           setDiscardTarget(null)
@@ -1989,6 +2018,10 @@ window.__ModuleLoader__.load({
       // banner and the per-row hint come from `retentionInfo`, which reads the
       // field where the Host actually sends it (`limits`).
       const retentionDays = retentionInfo(state).days
+      // One trash mutation at a time: the Host serializes them anyway, so a
+      // second click only queued another request behind the first and its error
+      // overwrote the first one's success flash.
+      const trashActionBusy = restoreBusyId !== null || purgeBusy === true || discardBusyId !== null
       const expiryHint = (entry) => {
         const left = retentionInfo(state, entry).daysLeft
         if (left === null) return ''
@@ -2072,7 +2105,7 @@ window.__ModuleLoader__.load({
               // The Host already knows whether this entry can be restored;
               // the panel used to offer the button and then show the refusal.
               h(Button, {
-                disabled: entry.capabilities?.canRestore === false,
+                disabled: entry.capabilities?.canRestore === false || trashActionBusy,
                 title: entry.capabilities?.canRestore === false ? t('error.E_TRASH_CONFLICT') : t('action.restore'),
                 onClick: () => { void restore(entry.trashId) },
               }, t('action.restore')),
@@ -2093,7 +2126,7 @@ window.__ModuleLoader__.load({
                   h(Button, { disabled: purgeBusy === true, onClick: () => { setPurgeTarget(null); setPurgePhrase('') } }, t('action.cancel')))
                 : h(Button, {
                   variant: 'danger',
-                  disabled: entry.capabilities?.canPurge === false,
+                  disabled: entry.capabilities?.canPurge === false || trashActionBusy,
                   title: entry.capabilities?.canPurge === false ? t('error.E_TRASH_CONFLICT') : t('action.purge'),
                   onClick: () => { setPurgeTarget(entry.trashId); setPurgePhrase('') },
                 }, t('action.purge')))))) : null,
@@ -2102,10 +2135,12 @@ window.__ModuleLoader__.load({
           entries: incomplete,
           discardTarget,
           discardPhrase,
+          discardForce,
           onPhrase: setDiscardPhrase,
-          onStart: (trashId) => { setDiscardTarget(trashId); setDiscardPhrase('') },
-          onCancel: () => { setDiscardTarget(null); setDiscardPhrase('') },
-          onDiscard: (trashId) => { void discard(trashId, discardPhrase.trim()) },
+          onStart: (trashId) => { setDiscardTarget(trashId); setDiscardPhrase(''); setDiscardForce(false) },
+          onForceStart: (trashId) => { setDiscardTarget(trashId); setDiscardPhrase(''); setDiscardForce(true) },
+          onCancel: () => { setDiscardTarget(null); setDiscardPhrase(''); setDiscardForce(false) },
+          onDiscard: (trashId) => { void discard(trashId, discardPhrase.trim(), discardForce) },
           onRestore: (trashId) => { void restoreIncomplete(trashId) },
           restoreBusyId,
           discardBusyId,

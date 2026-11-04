@@ -134,3 +134,23 @@ test('trash: a manifest whose session id could escape the workspace is unreadabl
     await home.cleanup()
   }
 })
+
+test('audit: a half-written trailing line cannot swallow the next record', async () => {
+  const home = await makeTempHome()
+  try {
+    const filePath = join(home.root, 'audit.jsonl')
+    // A crash left a record without its newline. The next append used to glue
+    // itself onto that fragment, so one corrupt line silently destroyed the
+    // record that came after it.
+    await writeFile(filePath, '{"id":"crashed","action":"delete"', 'utf8')
+    const audit = createAuditLog({ filePath, retentionLines: 1_000, maxBytes: 1 << 20 })
+    await audit.append({ id: 'after', action: 'delete', result: 'success' })
+    const text = await readFile(filePath, 'utf8')
+    const lines = text.split('\n').filter((line) => line !== '')
+    assert.equal(lines.length, 2, 'the new record must start on its own line')
+    assert.equal(JSON.parse(lines[1]).id, 'after')
+    assert.match(lines[0], /^\{.*crashed/, 'the broken fragment is kept, not silently repaired')
+  } finally {
+    await home.cleanup()
+  }
+})

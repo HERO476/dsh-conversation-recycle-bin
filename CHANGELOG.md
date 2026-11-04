@@ -3,6 +3,37 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.18] — 2026-11-04
+
+一次针对「失败之后再失败」链路的修补，加上客户端与宿主队列预算的统一。0.3.17 的评审结论是正常路径可信、错误处理链路第二层未被同等对待；这一版把 4 条可能导致数据不可逆丢失的路径、8 条一致性/健壮性缺口和文档漂移全部闭合。
+
+### Fixed
+
+- **记忆 bundle 的补偿失败会删掉唯一副本（高）**：`exportSession` 失败时先尝试把已移入 `files/` 的正文搬回原位，但 `rename` 的失败被 `.catch(() => {})` 吞掉，紧接着无条件删除整个 bundle 目录——此时 bundle 里的副本是唯一一份，索引已还原成指向不存在的路径。现在逐个记录搬回结果：全部成功才删 bundle；任一失败就保留 bundle 并写 `ORPHANED.json`（记录 adapter、sessionId、失败映射），既不丢数据也不留无法解释的残留。
+- **`restore` 从不写终态，审计一失败条目永久卡 `restoring`（中高）**：`'restored'` 只在 `PURGEABLE_STATUSES` 里出现过，没有任何写入点。恢复成功现在先提交 `status: 'restored'`（连同 `restoredAt`），再写审计；审计写失败不再把已完成的恢复报成失败，条目也不会再被重复 `catalog.restore`。内存仍有残留文件时保留条目，`memoryLeftOnDisk` 记入审计。
+- **快照缓存被就地修改（中）**：`snapshotCache` 与工作副本同一引用，`exportSession` 直接 `delete nodes[...]` / `node[field] = kept`；中途失败后缓存仍是"已删空"的样子——预览显示 0 条记忆，重试删除则静默跳过真实存在的记忆。现在在私有克隆上修改，缓存始终描述磁盘上的真实内容。
+- **三路全拒的死条目（中）**：日志头不可读且 memory 目录仍有文件时，restore 拒绝日志、discard 拒绝记忆、purge 拒绝状态，UI 没有任何按钮。`entryCapabilities` 新增 `canForceDiscard`，设置页对这类条目显示「强制清理（会丢弃记忆）」，仍要求输入 `DELETE`，审计记录 `discardedMemory: true`。`force` 只在这一种组合下被接受。
+- **审计半行会连带吞掉下一条（中低）**：`append` 直接追加，崩溃留下的半行没有换行，下一条记录与它粘成一行坏 JSON。现在追加前检查末字节，缺换行先补一个。
+- **记忆 bundle 路径没有围栏（中低）**：`restoreEntry` 直接按 manifest 的 `bundlePath` 读文件并 `rm -rf` 其目录；同 manifest 的 `from/to` 在 Host 侧是双向校验的。现在服务层接收 `bundleRoot`，越界即 `E_TRASH_CONFLICT`。
+- **客户端 195s 永远短于宿主 240s（中）**：宿主的回收站操作预算 = 锁预算 180s + 队列宽限 60s，客户端却固定 195s，浏览器先 abort，UI 报超时而后台仍在跑。四类 `/trash/*` 现在读 `/state` 下发的 `limits.queueTimeoutMs`，常量只作冷启动兜底（并改为 245s）。
+- **保留期清扫无视 `protectedSessionIds`（中）**：受保护会话过去只挡手动删除，定时清扫仍会把它的 hard 条目清掉。现在 hard/soft 都先判保护名单，命中记 `E_POLICY_PROTECTED` 并退避。
+- **会话列表读失败让整个面板 500（中）**：`loadList` 对 `controller.list`/`persistence.list` 没有异常处理，一次 5s 超时会让 `/sessions`、preview、delete 预检全部失效。现在降级为空列表并 warn。
+- **`preview` 透传记忆库绝对路径（低）**：`stores` 现在只保留 `id/label/available/reason`。
+- **配置修正静默（低）**：`clampInt` 截断小数、`memory.adapters` 非数组回退，过去都不留 warning；现在都进 `/state.warnings`。
+- **客户端细节**：补 `E_SESSION_ALIVE` 中英文案；回收站行 Restore/Purge/Discard 互斥，进行中的请求会禁用其它行内动作。
+
+### Docs
+
+- README 新增 §4.4 配置项全表（22 键、默认值与安全含义），补齐此前零提及的 9 个键。
+- 统一 `allowNonLoopback` 的说法：打开它会跳过整段 Host 校验并使 `allowedHosts` 失效，暴露到 loopback 之外应只配 `allowedHosts`。
+- 删除 README 中「`GET /trash` 会触发后台清扫」的过时描述（0.3.17 起 GET 已无副作用）。
+- `config.schema.json` 的保留期描述、`paths.js` 的 Node 版本注释、README 的宿主版本（0.2.2-alpha.3）与 `CHANGELOG` 对齐。
+- `package.json` 的 `files` 补入 `scripts/` 与 `test/`：README 与 INSTALL 指导用户运行 `npm test` 与 `node scripts/verify-host-contract.mjs`，此前从 npm 安装后两者都不存在。
+
+### Tests
+
+- `capabilities` 断言补 `canForceDiscard`；新增强制清理、restore 终态、审计半行、bundle 越界、`limits.queueTimeoutMs` 与错误码完整性用例。
+
 ## [0.3.17] — 2026-11-03
 
 针对 **dsh 0.2.2-alpha.3** 的适配性评审（安全 / 架构 / 验收三方独立只读复审）后的修复。评审本身的结论是「接口层 0 阻断、运行态未装载、行为层零证据」；这一版把其中所有能在代码里闭合的项做完，**运行态装载与破坏性链路仍需一次重启后的实测**（见 `scripts/verify-host-contract.mjs`）。
@@ -134,7 +165,7 @@ dsh-go（Android）适配性审计后的修复。审计结论：Host 半边开�
 - **锁毒化（P1）**：`release()` 删不掉锁文件时，过去只 `warn` 一句就走人 —— 残留锁的 `owner.pid` 是**自己这个活进程**，而 stale 判定对活 owner 永不放行，于是下一次 `acquire()` 必定失败，之后每一次 mutation 都是 409，只能重启。现在 release 失败会把锁体降级成 `{pid: null, at: 0}`（并把 mtime 拨到纪元），下一次 acquire 按"无主且超龄"立即破锁；实在写不进去才留 warn。
 - **PID 复用**：心跳每 5 秒刷新一次 mtime，所以"十拍未刷新"（`staleMs * 10`）就按残留锁处理并告警，不再出现"这个 pid 恰好被别的进程复用、于是永远破不了锁"。
 - **队列超时不再撒谎**：计时器过去从入队一直武装到结束，操作其实已经开跑时仍返回"没有执行"。现在操作一开始就 `clearTimeout`，只有真正还在排队时才报 `E_QUEUE_TIMEOUT`。
-- **客户端预算不再比宿主早 60 秒**：`/preview` 与 `/state` 的 `limits` 新增 `queueTimeoutMs`（宿主实际使用的队列预算），客户端优先用它；过去客户端只按锁预算推算，宿主的队列预算比它多 60 秒，于是"还在跑"看起来像超时失败。
+- **客户端预算不再比宿主早 60 秒**：`/preview` 与 `/state` 的 `limits` 新增 `queueTimeoutMs`（宿主实际使用的队列预算），客户端优先用它；过去客户端只按锁预算推算，宿主的队列预算比它多 60 秒，于是"还在跑"看起来像超时失败。（0.3.18 更正：当时只有 `/delete` 真正读取了该字段，四类 `/trash/*` 仍用固定 `195s`，比宿主 `240s` 预算短——见 0.3.18。）
 - **`running` 不再被兜成 `false`**：`gateway.inspect()` 的 `running: fromList?.running ?? false` 让"宿主没说"和"已停止"无法区分，`lifecycle.js` 的 fail-closed 分支成了死代码。现在保留 `undefined`，并且 `probeRunning()` 能回答时以它为准（`agents.get(id)?.status === 'running'`）。
 - **空闲会话又能删了**：硬删闸门过去看 `live`（"宿主还知道这个会话"），空闲会话也满足，于是 `stopLiveSessions: false` 时所有空闲对话都删不掉。现在看 `session.running`；宿主不报状态时才按严格读法（未知视为在跑）。
 - **`capabilities` 不再是死字段**：回收站行的「恢复」/「彻底删除」按 `entry.capabilities.canRestore/canPurge` 置灰，不再让用户点了才知道会被拒。

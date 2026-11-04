@@ -476,3 +476,101 @@ test('memory adapter: a legacy bundle still restores, a traversing one is refuse
     await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
   }
 })
+
+test('lingshu adapter: a failed put-back keeps the bundle instead of deleting the only copy', async () => {
+  const store = await makeStore()
+  const trashDir = join(store.root, 'trash')
+  try {
+    const { rename, writeFile: writeFileBase } = await import('node:fs/promises')
+    const fsApi = {
+      ...(await import('node:fs/promises')),
+      async rename(from, to) {
+        // Moving INTO the recycle bin works; moving back out of it fails. That
+        // is the double-failure window: the bundle holds the only copy left.
+        if (String(from).includes('trash') && !String(to).includes('trash')) {
+          throw Object.assign(new Error('EPERM: put-back refused'), { code: 'EPERM' })
+        }
+        return rename(from, to)
+      },
+      async writeFile(file, ...rest) {
+        if (String(file).includes('_index_log')) throw new Error('disk full')
+        return writeFileBase(file, ...rest)
+      },
+    }
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'lingshu',
+      label: 'test',
+      indexFile: join(store.root, '_index.json'),
+      rootDir: store.root,
+      indexLogDir: join(store.root, '_index_log'),
+      fsApi,
+    })
+    await assert.rejects(adapter.exportSession(SESSION_1, trashDir), (error) => error.code === 'E_MEMORY_FAILED')
+    const bundleDir = join(trashDir, 'memory', 'lingshu')
+    const bundle = JSON.parse(await readFile(join(bundleDir, 'bundle.json'), 'utf8'))
+    assert.ok(bundle.count > 0)
+    const marker = JSON.parse(await readFile(join(bundleDir, 'ORPHANED.json'), 'utf8'))
+    assert.equal(marker.sessionId, SESSION_1)
+    assert.ok(marker.missing.length > 0, 'the marker must name the files that could not be put back')
+    // The content still exists somewhere: losing it here was the P0.
+    const kept = await readFile(join(bundleDir, 'files', marker.missing[0].stored.split('/').pop()), 'utf8').catch(() => null)
+    assert.ok(kept === null || kept.length > 0)
+  } finally {
+    await store.cleanup()
+    await rm(trashDir, { recursive: true, force: true })
+  }
+})
+
+test('lingshu adapter: a failed export does not poison the cached snapshot', async () => {
+  const store = await makeStore()
+  const trashDir = join(store.root, 'trash')
+  try {
+    const { writeFile: writeFileBase } = await import('node:fs/promises')
+    const fsApi = {
+      ...(await import('node:fs/promises')),
+      async writeFile(file, ...rest) {
+        if (String(file).includes('_index_log')) throw new Error('disk full')
+        return writeFileBase(file, ...rest)
+      },
+    }
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'lingshu',
+      label: 'test',
+      indexFile: join(store.root, '_index.json'),
+      rootDir: store.root,
+      indexLogDir: join(store.root, '_index_log'),
+      fsApi,
+    })
+    const before = await adapter.countSessions([SESSION_1])
+    await assert.rejects(adapter.exportSession(SESSION_1, trashDir), (error) => error.code === 'E_MEMORY_FAILED')
+    // The export mutated the working copy before failing; if the cache shares
+    // that object, the next read reports the nodes as already gone and a retry
+    // silently skips the memory a user explicitly asked to delete.
+    const after = await adapter.countSessions([SESSION_1])
+    assert.equal(after.counts.get(SESSION_1), before.counts.get(SESSION_1))
+    assert.ok(after.counts.get(SESSION_1) > 0)
+  } finally {
+    await store.cleanup()
+    await rm(trashDir, { recursive: true, force: true })
+  }
+})
+
+test('restoreEntry: a memory bundle outside the recycle bin is refused before any read', async () => {
+  const store = await makeStore()
+  try {
+    // The manifest is on-disk state a user can edit; without a containment
+    // fence a hand-edited `bundlePath` made the restore read an arbitrary file
+    // and then delete its parent directory.
+    const service = createMemoryService({
+      adapters: [],
+      config: normalizeConfig({}).value,
+      bundleRoot: join(process.cwd(), 'test', '.tmp', 'trash-root'),
+    })
+    await assert.rejects(
+      service.restoreEntry({ adapters: [{ id: 'lingshu', label: 'test', bundlePath: store.root }] }),
+      (error) => error.code === 'E_TRASH_CONFLICT',
+    )
+  } finally {
+    await store.cleanup()
+  }
+})

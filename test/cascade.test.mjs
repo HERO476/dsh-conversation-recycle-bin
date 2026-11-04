@@ -439,7 +439,7 @@ test('capabilities: an incomplete entry with no payload cannot be restored and c
     { status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 } },
     { hasLogFiles: false, hasMemoryFiles: false, requirePayload: true },
   )
-  assert.deepEqual(caps, { status: 'failed', canRestore: false, canPurge: false, canDiscard: true })
+  assert.deepEqual(caps, { status: 'failed', canRestore: false, canPurge: false, canDiscard: true, canForceDiscard: false })
 })
 
 test('capabilities: a payload on disk makes restore possible and blocks discard', () => {
@@ -617,4 +617,87 @@ test('unrecoverable log: not restorable, and discard is the way out', async () =
   } finally {
     await home.cleanup()
   }
+})
+
+test('capabilities: an unreadable log plus a memory bundle exposes the forced exit', () => {
+  const entry = { status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 } }
+  const caps = entryCapabilities(entry, {
+    hasLogFiles: true,
+    hasMemoryFiles: true,
+    payloadRecoverable: false,
+    requirePayload: true,
+  })
+  assert.equal(caps.canRestore, false)
+  assert.equal(caps.canDiscard, false)
+  assert.equal(caps.canPurge, false)
+  assert.equal(caps.canForceDiscard, true, 'the third action must exist or the entry is stuck forever')
+})
+
+test('discard: force only works for an unreadable log and reports the memory it drops', async () => {
+  const home = await makeTempHome('force-discard-')
+  try {
+    const trashId = 't12-forc'
+    const entryDir = join(home.root, 'trash', trashId)
+    await mkdir(join(entryDir, 'session'), { recursive: true })
+    await mkdir(join(entryDir, 'memory', 'lingshu'), { recursive: true })
+    await writeFile(join(entryDir, 'session', 'session.jsonl'), 'not a log header\n')
+    await writeFile(join(entryDir, 'memory', 'lingshu', 'bundle.json'), '{"format":1}')
+    const entry = {
+      format: 1, trashId, sessionId: 'session-abc12345', title: 'Stuck', mode: 'hard', includeMemory: true,
+      status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+    }
+    const captured = new Map([[trashId, entry]])
+    const trash = {
+      async read(id) { return captured.get(id) ?? null },
+      entryDir(id) { return join(home.root, 'trash', id) },
+      async remove(id) { captured.delete(id) },
+      async update(id, patch) { Object.assign(captured.get(id), patch) },
+      async allocate() { throw new Error('not used') },
+      async write() { throw new Error('not used') },
+      async list() { return [...captured.values()] },
+    }
+    const ops = {
+      memory: { restoreEntry: async () => {} },
+      sessionLog: { restoreEntry: async () => {} },
+      catalog: { restore: async () => async () => {} },
+      session: { inspect: async () => null },
+      lifecycle: { quiesce: async () => async () => {} },
+      pathExists: async (target) => stat(target).then(() => true, () => false),
+      hasFiles: async (target) => (await readdir(target).catch(() => [])).length > 0,
+      recoverSessionLog: async () => null,
+      isInsideSessionsRoot: () => true,
+      isInsideTrashDir: () => true,
+    }
+    const audit = makeAudit()
+    await assert.rejects(
+      performDiscard({ entry, ops, trash, audit }),
+      (error) => error.code === 'E_TRASH_CONFLICT' && error.details?.forceable === true,
+    )
+    const result = await performDiscard({ entry, ops, trash, audit, force: true })
+    assert.equal(result.trashId, trashId)
+    assert.equal(captured.has(trashId), false)
+    const record = audit.records.find((item) => item.action === 'discard')
+    assert.equal(record.discardedMemory, true, 'the audit trail must say the memory bundle went with it')
+  } finally {
+    await home.cleanup()
+  }
+})
+
+test('restore: a completed restore records its terminal state before the audit write', async () => {
+  const { ops } = makeOps()
+  const trash = makeTrash()
+  const entry = {
+    format: 1, trashId: 't13-term', sessionId: session.id, title: 'T', mode: 'hard', includeMemory: false,
+    status: 'pending', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 },
+  }
+  trash.entries.set(entry.trashId, entry)
+  // The log mapping is rebuilt from the header, exactly like the crash window.
+  ops.recoverSessionLog = async (record) => ({ sessionId: record.sessionId, from: '/sessions/session', to: '/trash/session' })
+  // Memory files left on disk: the entry must survive as `restored`, not keep
+  // claiming `restoring` (where a second restore would run catalog.restore again).
+  ops.hasFiles = async (target) => String(target).includes('memory')
+  await performRestore({ entry, ops, trash, audit: makeAudit(), now: () => 7_000 })
+  const stored = trash.entries.get(entry.trashId)
+  assert.equal(stored.status, 'restored')
+  assert.equal(stored.restoredAt, 7_000)
 })

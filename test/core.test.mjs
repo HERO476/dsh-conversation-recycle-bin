@@ -246,3 +246,15 @@ test('policy: an idle conversation stays deletable when live agents are not stop
   assert.equal(evaluateSessionPolicy({ session: idle, workspace, live: true, mode: 'soft', config })
     .warnings.some((warning) => /running right now/.test(warning)), false)
 })
+
+test('normalizeConfig: a rounded integer and a replaced adapter list are both reported', () => {
+  // 0.4 days used to become 0 (= keep forever) with no warning at all, which
+  // silently inverts the intent of the setting.
+  const rounded = normalizeConfig({ trashRetentionDays: 0.4 })
+  assert.equal(rounded.value.trashRetentionDays, 0)
+  assert.ok(rounded.warnings.some((line) => line.includes('trashRetentionDays') && line.includes('rounded')))
+
+  const replaced = normalizeConfig({ memory: { adapters: 'lingshu' } })
+  assert.deepEqual(replaced.value.memory.adapters, DEFAULTS.memory.adapters)
+  assert.ok(replaced.warnings.some((line) => line.includes('memory.adapters')))
+})

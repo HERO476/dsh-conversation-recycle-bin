@@ -48,6 +48,7 @@ async function makeFixture({
   ctxExtra = {},
   mutationLock = null,
   connection = null,
+  clock = null,
 } = {}) {
   const home = await makeTempHome()
   const workspaceRegistry = makeWorkspaceRegistry([
@@ -142,6 +143,7 @@ async function makeFixture({
     ctx: { get: (name) => services[name], ...ctxExtra },
     config,
     paths,
+    ...(clock === null ? {} : { now: clock }),
     logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
     mutationLock,
   })
@@ -1332,7 +1334,7 @@ test('trash: a malformed id is a 400 before any path is built', async () => {
   const fixture = await makeFixture()
   try {
     for (const trashId of ['../../etc', 'a/b', '', 'x'.repeat(200), 'not a valid id']) {
-      const result = await call(fixture.api, '/trash/discard', { body: { trashId, phrase: '' } })
+      const result = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: '' } })
       assert.equal(result.status, 400, `expected 400 for ${JSON.stringify(trashId)}`)
       assert.equal(result.body.error.code, 'E_BAD_REQUEST')
     }
@@ -1848,5 +1850,152 @@ test('confirmation: the typed DELETE phrase is matched case-insensitively', asyn
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
   } finally {
     await fixture.home.cleanup()
+  }
+})
+
+test('errors: the confirmation, trash and memory failure codes are the ones the Client parses', async () => {
+  // E_CONFIRM_REQUIRED: no token at all.
+  let fixture = await makeFixture()
+  try {
+    const missing = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft' },
+    })
+    assert.equal(missing.status, 428)
+    assert.equal(missing.body.error.code, 'E_CONFIRM_REQUIRED')
+  } finally {
+    await fixture.home.cleanup()
+  }
+
+  // E_CONFIRM_EXPIRED: a token past its TTL, driven by an injected clock so the
+  // test does not sleep for the 5s minimum TTL.
+  let clock = 1_700_000_000_000
+  fixture = await makeFixture({ configOverrides: { confirmTokenTtlMs: 5000 }, clock: () => clock })
+  try {
+    const preview = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft' },
+    })
+    const token = preview.body.preview.confirmation.token
+    clock += 6_000
+    const expired = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: token },
+    })
+    assert.equal(expired.status, 410)
+    assert.equal(expired.body.error.code, 'E_CONFIRM_EXPIRED')
+  } finally {
+    await fixture.home.cleanup()
+  }
+
+  // E_TRASH_NOT_FOUND: a well-formed id that was never allocated.
+  fixture = await makeFixture()
+  try {
+    const missingEntry = await call(fixture.api, '/trash/purge', {
+      body: { trashId: 'zz-abcdef', confirmPhrase: 'DELETE' },
+    })
+    assert.equal(missingEntry.status, 404)
+    assert.equal(missingEntry.body.error.code, 'E_TRASH_NOT_FOUND')
+  } finally {
+    await fixture.home.cleanup()
+  }
+
+  // E_DISABLED: the master switch still refuses mutations (reads stay open).
+  fixture = await makeFixture({ configOverrides: { enabled: false } })
+  try {
+    const disabled = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft' },
+    })
+    assert.equal(disabled.status, 503)
+    assert.equal(disabled.body.error.code, 'E_DISABLED')
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.status, 200, 'the state probe explains why the plugin is off')
+  } finally {
+    await fixture.home.cleanup()
+  }
+
+  // E_MEMORY_FAILED is covered at the adapter level (memory.test.mjs): the HTTP
+  // code only surfaces in the race where the probe passed and the store broke
+  // microseconds later, which cannot be constructed deterministically. What the
+  // API must do when the store is already broken is degrade honestly: report it
+  // unavailable instead of counting it as zero entries.
+  fixture = await makeFixture()
+  try {
+    await writeFile(join(fixture.memoryRoot, '_index.json'), '{ this is not json', 'utf8')
+    const preview = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1], includeMemory: true, mode: 'soft' },
+    })
+    assert.equal(preview.status, 200)
+    const lingshu = preview.body.preview.memory.adapters.find((adapter) => adapter.id === 'lingshu')
+    assert.equal(lingshu.available, false, 'a broken store must not read as "0 entries"')
+    assert.ok(typeof lingshu.reason === 'string' && lingshu.reason.length > 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: a conversation protected after deletion is not swept', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
+    const deleted = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S2], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(deleted.status, 200)
+
+    const listed = await fixture.api.__test.trashList()
+    const trashId = listed.entries[0].trashId
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    // The user protects the conversation after deleting it. Retention is the
+    // unattended path, so it must respect the same fence the manual delete
+    // does; otherwise a protected conversation is purged behind the user.
+    fixture.config.protectedSessionIds.push(S2)
+
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.deepEqual(swept.purged, [])
+    assert.ok(swept.failed.some((item) => item.trashId === trashId && item.code === 'E_POLICY_PROTECTED'))
+    assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('preview: adapter state never leaks a filesystem path', async () => {
+  const fixture = await makeFixture()
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: true, mode: 'soft' } })
+    assert.equal(preview.status, 200)
+    const stores = preview.body.preview.memory.stores
+    assert.ok(Array.isArray(stores))
+    for (const store of stores) {
+      assert.equal(typeof store.id, 'string')
+      assert.equal('storePath' in store, false)
+      assert.equal('indexFile' in store, false)
+    }
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('gateway: an unavailable session list degrades to empty instead of failing the route', async () => {
+  const home = await makeTempHome()
+  try {
+    const warnings = []
+    const gateway = createSessionGateway({
+      ctx: {
+        get: (name) => (name === 'sessionController'
+          ? { list: async () => { throw new Error('controller timed out') } }
+          : name === 'sessionPersistence'
+            ? { list: async () => { throw new Error('persistence timed out') } }
+            : undefined),
+      },
+      paths: resolveDataPaths(home.root),
+      logger: { warn: (...args) => warnings.push(args.join(' ')), error() {} },
+    })
+    assert.deepEqual(await gateway.list(), [])
+    assert.ok(warnings.some((line) => line.includes('session list unavailable')))
+  } finally {
+    await home.cleanup()
   }
 })
