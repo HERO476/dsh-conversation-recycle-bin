@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { normalizeConfig } from '../lib/core/config.js'
 import { createFileLock } from '../lib/core/file-lock.js'
-import { createDeleteApi, QUEUE_GRACE_MS, ROUTE_PREFIX, TRASH_LOCK_BUDGET_MS } from '../lib/host/api.js'
+import { createDeleteApi, QUEUE_GRACE_MS, ROUTE_PREFIX, TRASH_LOCK_BUDGET_MS, requestOriginVerdict } from '../lib/host/api.js'
 import { createSessionLogOps } from '../lib/host/catalog.js'
 import { createSessionGateway } from '../lib/host/gateway.js'
 import { createLifecycleOps } from '../lib/host/lifecycle.js'
@@ -1997,5 +1997,76 @@ test('gateway: an unavailable session list degrades to empty instead of failing 
     assert.ok(warnings.some((line) => line.includes('session list unavailable')))
   } finally {
     await home.cleanup()
+  }
+})
+
+// The origin fence compares the authority literally. A proxy (or a shell) that
+// rewrites `Host` to 127.0.0.1 while the page keeps `localhost` — or drops the
+// header entirely — yields a 403 the user cannot explain, so the exact matrix
+// is pinned here.
+test('origin fence: loopback spellings, the desktop shell and a missing Host', () => {
+  const verdict = (headers) => requestOriginVerdict(headers, { requireSameOrigin: true, allowNonLoopback: false, allowedHosts: [] })
+  const ok = [
+    { host: '127.0.0.1:1067', origin: 'http://127.0.0.1:1067' },
+    { host: 'localhost:1067', origin: 'http://localhost:1067' },
+    { host: '127.0.0.1:1067', origin: 'dsh-app://app' },
+    { host: '127.0.0.1:1067' },
+  ]
+  for (const headers of ok) assert.equal(verdict(headers).ok, true, JSON.stringify(headers))
+  const refused = [
+    [{ host: '127.0.0.1:1067', origin: 'http://localhost:1067' }, 'E_FORBIDDEN_ORIGIN'],
+    [{ host: 'localhost:1067', origin: 'http://127.0.0.1:1067' }, 'E_FORBIDDEN_ORIGIN'],
+    [{ host: '127.0.0.1:1067', origin: 'http://127.0.0.1:1068' }, 'E_FORBIDDEN_ORIGIN'],
+    [{ host: '127.0.0.1:1067', 'sec-fetch-site': 'cross-site', origin: 'http://127.0.0.1:1067' }, 'E_FORBIDDEN_ORIGIN'],
+    [{ origin: 'http://127.0.0.1:1067' }, 'E_FORBIDDEN_HOST'],
+  ]
+  for (const [headers, code] of refused) {
+    const result = verdict(headers)
+    assert.equal(result.ok, false, JSON.stringify(headers))
+    assert.equal(result.error.code, code, JSON.stringify(headers))
+  }
+})
+
+// Memory files whose bundle was never written are unrecoverable: the list must
+// say so, and the discard route must accept the forced (phrase-confirmed) exit
+// that the panel then offers.
+test('trash: stranded memory files offer, and accept, the forced discard', async () => {
+  const fixture = await makeFixture()
+  try {
+    const trashId = `strand-${Date.now().toString(36)}`
+    const entryDir = join(fixture.paths.trashDir, trashId)
+    await mkdir(join(entryDir, 'memory', 'md', 'files'), { recursive: true })
+    await writeFile(join(entryDir, 'memory', 'md', 'files', 'n1.content'), 'body', 'utf8')
+    await writeFile(join(entryDir, 'memory', 'md', 'ORPHANED.json'), '{"format":1}', 'utf8')
+    await writeFile(join(entryDir, 'manifest.json'), JSON.stringify({
+      format: 1,
+      trashId,
+      sessionId: S1,
+      title: 'stranded memory',
+      mode: 'hard',
+      includeMemory: true,
+      deletedAt: Date.now(),
+      createdAt: Date.now(),
+      status: 'failed',
+      sessionLog: null,
+      catalog: null,
+      memory: { adapters: [], total: 0 },
+    }), 'utf8')
+
+    const listed = await call(fixture.api, '/trash', { method: 'GET' })
+    const row = [...(listed.body.trash ?? []), ...(listed.body.incomplete ?? [])].find((item) => item.trashId === trashId)
+    assert.ok(row !== undefined, 'the entry must be listed')
+    assert.equal(row.capabilities.strandedMemory, true)
+    assert.equal(row.capabilities.canForceDiscard, true)
+
+    const withoutForce = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'DELETE' } })
+    assert.equal(withoutForce.status, 409)
+    assert.equal(await pathExists(entryDir), true)
+
+    const forced = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'delete', force: true } })
+    assert.equal(forced.status, 200)
+    assert.equal(await pathExists(entryDir), false)
+  } finally {
+    await fixture.home.cleanup()
   }
 })

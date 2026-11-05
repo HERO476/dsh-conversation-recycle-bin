@@ -3,6 +3,32 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.19] — 2026-11-05
+
+平台审计（架构 / 安全 / 验收三方独立复审 v0.3.18）之后的修复。三方从不同角度撞到同一处：**记忆残留的条目在 UI/API 上没有任何出口**；另有一条把瞬时读失败当永久不可恢复。
+
+### Fixed
+
+- **失败导出的残留变成可恢复**（架构 P2 / 验收 R-21-01）：`bundle.json` 过去只在整个搬移循环结束后才写，若在此之前失败且补偿搬回也失败，目录只剩 `files/` 与 `ORPHANED.json` —— `readExported` 只认 bundle，restore 无物可读、discard 拒绝文件、force 又要求"日志不可读"，条目永久留盘。现在补偿决定保留时**同时写一份 rescue bundle**（用仍留在 `files/` 的条目重建），让恢复重新有路。
+- **索引已有节点、内容仍在 bundle 时不再拒绝恢复**（同一根因的另一半）：失败导出会把索引还原成 pristine（节点还在），旧逻辑看到"节点已存在"就直接 `E_TRASH_CONFLICT`；现在若内容文件仍在 bundle 里，就把它搬回并视为已恢复。
+- **`restored` 残留条目有了 purge 入口**（架构 ARCH-02 / 验收 R-21-02）：恢复成功但 `memory/` 仍有文件时，条目落在"未完成条目"面板，Restore/Discard/Force 全不可用，而 API 的 purge 其实允许。`IncompleteEntries` 现在对 `canPurge === true` 渲染 purge（沿用 `DELETE` 短语确认）。
+- **瞬时读失败不再被当成永久不可恢复**（安全 S-01）：`recoverSessionLog`/`readSessionLogCwd` 过去把所有错误吞成 `null`，于是 EACCES/EBUSY（杀软、备份锁）也会让列表隐藏 Restore 并提供"强制清理（会丢弃记忆）"。现在只有 `ENOENT`/`ENOTDIR` 与解析失败算"确实读不出"，`EACCES`/`EPERM`/`EBUSY`/`EMFILE`/`ENFILE`/`EAGAIN` 一律按瞬时处理：能力位保持 `canRestore`、不给 force，恢复时提示"稍后重试"。
+- **stranded 记忆成为第三种 force 场景**（架构 ARCH-01 的出口）：`entryCapabilities` 新增 `strandedMemory`，与"日志不可读"同级允许 `canForceDiscard`（仍需 `DELETE` 短语）。
+
+### Changed
+
+- **内联确认框改为订阅 seat 状态**：`overlaySeatMounted` 布尔换成 `overlaySeatStore`（订阅式），`DialogHost` 挂载即发布，面板同帧让位；不再依赖 250ms 轮询，消除了双渲染窗口（架构 ARCH-06 / 安全 S-03）。
+- **`lastSweep` 显示相对时间**："Host 已在后台自动清理 N 条"补上 `{when}`（刚刚 / N 分钟前 / N 小时前 / N 天前），避免把 6 小时前的结果当成刚刚发生。
+- `audit.append` 的文档补上契约：**调用方必须已持有跨进程 mutation 锁**（`serialize()` 只排本进程的顺序，补换行读末字节与另一 Host 的追加会交错）。
+
+### Tests
+
+- `test/cascade.test.mjs`（30 → 32）：stranded 记忆开启 force 出口 / 无 stranded 时不开启；force 在 stranded 下被接受、无 stranded 时拒绝且 `forceable` 不置位；瞬时 `EBUSY` 时 restore 提示重试、discard 不把 force 打开。
+- `test/memory.test.mjs`（18 → 19）：导出失败 + 补偿搬回失败 → 留下可用的 rescue bundle，且 `restoreBundle` 能把内容搬回。
+- `test/client-module.test.mjs`（29 → 31）：`canPurge` 时渲染 purge（无该能力时不渲染任何破坏性动作）；`formatAgo` 的相对时间文案。
+- `test/api.test.mjs`（68 → 70）：Origin 栅栏矩阵（127/localhost 混用 403、缺 Host 403、`dsh-app://app` 豁免、跨站拒绝）；端到端验证 stranded 条目被列出为 `strandedMemory` 且 `force:true` 的 discard 被接受（不带 force 仍 409）。
+- 合计 213 → **221**。
+
 ## [0.3.18] — 2026-11-04
 
 一次针对「失败之后再失败」链路的修补，加上客户端与宿主队列预算的统一。0.3.17 的评审结论是正常路径可信、错误处理链路第二层未被同等对待；这一版把 4 条可能导致数据不可逆丢失的路径、8 条一致性/健壮性缺口和文档漂移全部闭合。

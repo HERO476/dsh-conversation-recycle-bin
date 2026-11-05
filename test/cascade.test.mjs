@@ -439,7 +439,7 @@ test('capabilities: an incomplete entry with no payload cannot be restored and c
     { status: 'failed', sessionLog: null, catalog: null, memory: { adapters: [], total: 0 } },
     { hasLogFiles: false, hasMemoryFiles: false, requirePayload: true },
   )
-  assert.deepEqual(caps, { status: 'failed', canRestore: false, canPurge: false, canDiscard: true, canForceDiscard: false })
+  assert.deepEqual(caps, { status: 'failed', canRestore: false, canPurge: false, canDiscard: true, canForceDiscard: false, strandedMemory: false })
 })
 
 test('capabilities: a payload on disk makes restore possible and blocks discard', () => {
@@ -700,4 +700,129 @@ test('restore: a completed restore records its terminal state before the audit w
   const stored = trash.entries.get(entry.trashId)
   assert.equal(stored.status, 'restored')
   assert.equal(stored.restoredAt, 7_000)
+})
+
+// Memory files with no readable bundle cannot be restored by anything, so the
+// entry must expose the forced, phrase-confirmed exit instead of three dead
+// buttons (the stranded state that used to have no way out at all).
+test('capabilities: stranded memory files open the forced-discard exit', () => {
+  const base = { status: 'failed', sessionLog: null, catalog: null, memory: { total: 0 } }
+  const stranded = entryCapabilities(base, { hasLogFiles: false, hasMemoryFiles: true, strandedMemory: true, requirePayload: true })
+  assert.equal(stranded.canForceDiscard, true)
+  assert.equal(stranded.strandedMemory, true)
+  assert.equal(stranded.canDiscard, false, 'plain discard still refuses files it cannot account for')
+
+  const healthy = entryCapabilities(base, { hasLogFiles: false, hasMemoryFiles: true, strandedMemory: false, requirePayload: true })
+  assert.equal(healthy.canForceDiscard, false, 'a readable bundle must not offer the destructive exit')
+})
+
+test('discard: force is accepted for stranded memory and still refused without it', async () => {
+  const home = await makeTempHome('stranded-')
+  try {
+    const trashId = 't5-strand'
+    const entryDir = join(home.root, 'trash', trashId)
+    await mkdir(join(entryDir, 'memory', 'md', 'files'), { recursive: true })
+    await writeFile(join(entryDir, 'memory', 'md', 'files', 'x.content'), 'body', 'utf8')
+    const entry = {
+      format: 1, trashId, sessionId: 'session-abc12345', title: 'stranded',
+      mode: 'hard', includeMemory: true, status: 'failed', sessionLog: null, catalog: null,
+      memory: { adapters: [], total: 0 },
+    }
+    const captured = new Map([[trashId, entry]])
+    const trash = {
+      async read(id) { return captured.get(id) ?? null },
+      entryDir(id) { return join(home.root, 'trash', id) },
+      async remove(id) { captured.delete(id) },
+      async update(id, patch) { Object.assign(captured.get(id), patch) },
+      async allocate() { throw new Error('not used') },
+      async write() { throw new Error('not used') },
+      async list() { return [...captured.values()] },
+    }
+    const ops = {
+      memory: { restoreEntry: async () => {} },
+      sessionLog: { restoreEntry: async () => {} },
+      catalog: { restore: async () => async () => {} },
+      session: { inspect: async () => null },
+      lifecycle: { quiesce: async () => async () => {} },
+      pathExists: async (target) => stat(target).then(() => true, () => false),
+      hasFiles: async (target) => (await readdir(target).catch(() => [])).length > 0,
+      hasStrandedMemory: async (dir) => {
+        const names = await readdir(join(dir, 'memory'), { withFileTypes: true }).catch(() => [])
+        for (const dirent of names) {
+          if (!dirent.isDirectory()) continue
+          if (await stat(join(dir, 'memory', dirent.name, 'bundle.json')).then(() => true, () => false)) continue
+          const files = await readdir(join(dir, 'memory', dirent.name, 'files'), { recursive: true }).catch(() => [])
+          if (files.length > 0) return true
+        }
+        return false
+      },
+      recoverSessionLog: async () => null,
+      isInsideSessionsRoot: () => true,
+      isInsideTrashDir: () => true,
+    }
+
+    // Without force: refused, and the refusal says it is forceable.
+    await assert.rejects(
+      performDiscard({ entry, ops, trash, audit: makeAudit() }),
+      (error) => error.code === 'E_TRASH_CONFLICT' && error.details?.forceable === true,
+    )
+    assert.equal(captured.has(trashId), true, 'a refused discard must not delete anything')
+
+    // With force (the phrase is checked by the route): accepted.
+    await performDiscard({ entry, ops, trash, audit: makeAudit(), force: true })
+    assert.equal(captured.has(trashId), false)
+  } finally {
+    await home.cleanup()
+  }
+})
+
+// A locked log is not an unreadable one: the entry must keep its restore path
+// instead of advertising a discard that deletes the memory bundle.
+test('restore: a transient log read failure asks to retry instead of declaring the log lost', async () => {
+  const home = await makeTempHome('transient-')
+  try {
+    const trashId = 't6-transient'
+    const entryDir = join(home.root, 'trash', trashId)
+    await mkdir(join(entryDir, 'session'), { recursive: true })
+    await writeFile(join(entryDir, 'session', 'session.jsonl'), '{"cwd":"/x"}\n', 'utf8')
+    const entry = {
+      format: 1, trashId, sessionId: 'session-abc12345', title: 'locked',
+      mode: 'hard', includeMemory: false, status: 'pending', sessionLog: null, catalog: null,
+      memory: { adapters: [], total: 0 },
+    }
+    const trash = {
+      async read() { return entry },
+      entryDir() { return entryDir },
+      async remove() {},
+      async update() {},
+      async allocate() { throw new Error('not used') },
+      async write() { throw new Error('not used') },
+      async list() { return [entry] },
+    }
+    const locked = Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' })
+    const ops = {
+      memory: { restoreEntry: async () => {} },
+      sessionLog: { restoreEntry: async () => {} },
+      catalog: { restore: async () => async () => {} },
+      session: { inspect: async () => null },
+      lifecycle: { quiesce: async () => async () => {} },
+      pathExists: async (target) => stat(target).then(() => true, () => false),
+      hasFiles: async () => false,
+      hasStrandedMemory: async () => false,
+      recoverSessionLog: async () => { throw locked },
+      isInsideSessionsRoot: () => true,
+      isInsideTrashDir: () => true,
+    }
+    await assert.rejects(
+      performRestore({ entry, ops, trash, audit: makeAudit() }),
+      (error) => error.code === 'E_TRASH_CONFLICT' && error.details?.reason === 'log-read-transient',
+    )
+    // Discard must not treat that same transient error as "permanently lost".
+    await assert.rejects(
+      performDiscard({ entry, ops, trash, audit: makeAudit(), force: true }),
+      (error) => error.code === 'E_TRASH_CONFLICT' && error.details?.forceable !== true,
+    )
+  } finally {
+    await home.cleanup()
+  }
 })

@@ -116,6 +116,11 @@ window.__ModuleLoader__.load({
         'trash.expiresIn': 'auto-purged in {days} d',
         'trash.expiresSoon': 'auto-purged on the next check',
         'trash.swept': 'The Host cleaned up {count} expired entries in the background.',
+        'trash.sweptAgo': 'The Host cleaned up {count} expired entries {when}.',
+        'time.justNow': 'just now',
+        'time.minutesAgo': '{count} min ago',
+        'time.hoursAgo': '{count} h ago',
+        'time.daysAgo': '{count} d ago',
         'trash.modeSoft': 'soft',
         'trash.modeHard': 'permanent',
         'trash.items': '{sessions} conversation(s) · {memories} memory entries',
@@ -125,6 +130,7 @@ window.__ModuleLoader__.load({
         'trash.incompleteTitle': 'Incomplete entries',
         'trash.incompleteHint': 'Entries that never committed. Discard them to free the space; an entry that still holds a conversation log must be restored or purged instead.',
         'trash.restoreIncompleteHint': 'Put the conversation log back and re-attach it to its workspace.',
+        'trash.purgeIncompleteHint': 'Delete this entry and everything still inside it. Type DELETE to confirm.',
         'trash.discard': 'Discard',
         'trash.discarded': 'Entry removed.',
         'trash.confirmDiscard': 'Type DELETE to discard this incomplete entry.',
@@ -282,6 +288,11 @@ window.__ModuleLoader__.load({
         'trash.expiresIn': '{days} 天后自动清理',
         'trash.expiresSoon': '下次检查时自动清理',
         'trash.swept': 'Host 已在后台自动清理 {count} 条过期条目。',
+        'trash.sweptAgo': 'Host 已在{when}自动清理 {count} 条过期条目。',
+        'time.justNow': '刚刚',
+        'time.minutesAgo': '{count} 分钟前',
+        'time.hoursAgo': '{count} 小时前',
+        'time.daysAgo': '{count} 天前',
         'trash.modeSoft': '软删除',
         'trash.modeHard': '彻底',
         'trash.items': '{sessions} 个对话 · {memories} 条记忆',
@@ -291,6 +302,7 @@ window.__ModuleLoader__.load({
         'trash.incompleteTitle': '未完成条目',
         'trash.incompleteHint': '这些条目没有提交成功，可直接清理以释放空间；仍保存着会话日志的条目请先恢复或彻底删除。',
         'trash.restoreIncompleteHint': '把会话日志放回原位，并重新挂回它所属的工作区。',
+        'trash.purgeIncompleteHint': '彻底删除该条目及其中残留的内容，需要输入 DELETE 确认。',
         'trash.discard': '清理',
         'trash.discarded': '条目已清理。',
         'trash.confirmDiscard': '输入 DELETE 清理该未完成条目。',
@@ -704,34 +716,28 @@ window.__ModuleLoader__.load({
      * only confirmation dialog the delete flow had. Settings still gets a page
      * island, so the panel can render that same dialog inline instead of
      * pretending the button did nothing.
+     *
+     * A store, not a poll: the panel and the host must flip in the same frame,
+     * otherwise both copies of the dialog render for a tick.
      */
-    let overlaySeatMounted = false
+    const overlaySeatStore = {
+      mounted: false,
+      listeners: new Set(),
+      subscribe(listener) {
+        this.listeners.add(listener)
+        return () => this.listeners.delete(listener)
+      },
+      set(mounted) {
+        const next = mounted === true
+        if (this.mounted === next) return
+        this.mounted = next
+        for (const listener of this.listeners) listener(next)
+      },
+    }
 
     function useOverlaySeatPresent() {
-      const [present, setPresent] = useState(overlaySeatMounted === true)
-      useEffect(() => {
-        if (overlaySeatMounted === true) {
-          setPresent(true)
-          return undefined
-        }
-        // The overlay host mounts with the shell, but nothing guarantees it is
-        // already there when this panel first renders: poll briefly so a late
-        // mount still wins over the inline copy instead of rendering both.
-        let timer = null
-        const tick = () => {
-          if (overlaySeatMounted !== true) return
-          if (timer !== null) clearInterval(timer)
-          setPresent(true)
-        }
-        timer = setInterval(tick, 250)
-        const stop = setTimeout(() => {
-          if (timer !== null) clearInterval(timer)
-        }, 10_000)
-        return () => {
-          if (timer !== null) clearInterval(timer)
-          clearTimeout(stop)
-        }
-      }, [])
+      const [present, setPresent] = useState(overlaySeatStore.mounted)
+      useEffect(() => overlaySeatStore.subscribe(setPresent), [])
       return present
     }
 
@@ -1026,6 +1032,25 @@ window.__ModuleLoader__.load({
       } catch {
         return String(value)
       }
+    }
+
+    /**
+     * "3 hours ago"-style label for the last background sweep.
+     *
+     * The sweep only runs on the Host's own timer, so the same result stays in
+     * `lastSweep` for up to six hours. Rendering it without a time made users
+     * think the entries had just been deleted on the refresh they had in front
+     * of them.
+     */
+    function formatAgo(value, nowMs = Date.now()) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return ''
+      const seconds = Math.max(0, Math.round((nowMs - value) / 1000))
+      if (seconds < 60) return t('time.justNow')
+      const minutes = Math.round(seconds / 60)
+      if (minutes < 60) return t('time.minutesAgo', { count: minutes })
+      const hours = Math.round(minutes / 60)
+      if (hours < 24) return t('time.hoursAgo', { count: hours })
+      return t('time.daysAgo', { count: Math.round(hours / 24) })
     }
 
     /**
@@ -1588,9 +1613,11 @@ window.__ModuleLoader__.load({
       const payload = useDialogState()
       const flash = useFlashMessage()
       useEffect(() => {
-        overlaySeatMounted = true
+        // Publishing synchronously on mount is what keeps the inline copy from
+        // rendering alongside this one: the panel is subscribed, not polling.
+        overlaySeatStore.set(true)
         return () => {
-          overlaySeatMounted = false
+          overlaySeatStore.set(false)
         }
       }, [])
       // `kind` is optional: every pre-0.2.2 caller opens a delete dialog, so a
@@ -1668,7 +1695,7 @@ window.__ModuleLoader__.load({
      * log) gets a Restore button: `performDiscard` refuses exactly those
      * entries, so without this the only way out was a manual API call.
      */
-    function IncompleteEntries({ entries, discardTarget, discardPhrase, discardForce = false, onPhrase, onStart, onForceStart, onCancel, onDiscard, onRestore, restoreBusyId, discardBusyId = null }) {
+    function IncompleteEntries({ entries, discardTarget, discardPhrase, discardForce = false, onPhrase, onStart, onForceStart, onCancel, onDiscard, onRestore, restoreBusyId, discardBusyId = null, purgeTarget = null, purgePhrase = '', onPurgePhrase, onPurgeStart, onPurgeCancel, onPurge, purgeBusyId = null }) {
       return h('div', { className: 'dc-panel dc-incomplete' },
         h('div', { className: 'dc-state-title' }, `${t('trash.incompleteTitle')} (${entries.length})`),
         h('p', { className: 'dc-hint' }, t('trash.incompleteHint')),
@@ -1705,6 +1732,34 @@ window.__ModuleLoader__.load({
                   disabled: restoreBusyId === entry.trashId,
                   title: t('trash.restoreIncompleteHint'),
                 }, t('action.restore'))
+                : null,
+              // A restored entry that still holds memory files is purgeable by
+              // the API but was not reachable from this panel: it rendered no
+              // action at all. Offer the same confirmed purge the trash rows use.
+              entry.capabilities?.canPurge === true && typeof onPurge === 'function'
+                ? purgeTarget === entry.trashId
+                  ? h('span', { className: 'dc-inline-confirm' },
+                    h('input', {
+                      type: 'text',
+                      value: purgePhrase,
+                      placeholder: 'DELETE',
+                      className: 'dc-input dc-input-small',
+                      onChange: (event) => onPurgePhrase(event.target.value),
+                      autoCapitalize: 'characters',
+                      autoCorrect: 'off',
+                      spellCheck: false,
+                    }),
+                    h(Button, {
+                      variant: 'danger',
+                      disabled: purgeBusyId === entry.trashId || phraseMatches(purgePhrase, 'DELETE') !== true,
+                      onClick: () => onPurge(entry.trashId),
+                    }, t('action.purge')),
+                    h(Button, { disabled: purgeBusyId === entry.trashId, onClick: onPurgeCancel }, t('action.cancel')))
+                  : h(Button, {
+                    variant: 'danger',
+                    onClick: () => onPurgeStart(entry.trashId),
+                    title: t('trash.purgeIncompleteHint'),
+                  }, t('action.purge'))
                 : null,
               typeof openDiscard !== 'function'
                 ? null
@@ -2093,7 +2148,9 @@ window.__ModuleLoader__.load({
         tab === 'trash' ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
           retentionDays > 0 ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.retention', { days: retentionDays })) : null,
           Number(lastSweep?.purged) > 0
-            ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.swept', { count: Number(lastSweep.purged) }))
+            ? h('div', { className: 'dc-hint dc-hint-block' }, typeof lastSweep?.at === 'number'
+              ? t('trash.sweptAgo', { count: Number(lastSweep.purged), when: formatAgo(lastSweep.at) })
+              : t('trash.swept', { count: Number(lastSweep.purged) }))
             : null,
           trash.length === 0 ? h('div', { className: 'dc-empty' }, t('trash.empty')) : null,
           ...trash.map((entry) => h('div', { key: entry.trashId, className: 'dc-row' },
@@ -2144,6 +2201,13 @@ window.__ModuleLoader__.load({
           onRestore: (trashId) => { void restoreIncomplete(trashId) },
           restoreBusyId,
           discardBusyId,
+          purgeTarget,
+          purgePhrase,
+          purgeBusyId: purgeBusy === true ? purgeTarget : null,
+          onPurgePhrase: setPurgePhrase,
+          onPurgeStart: (trashId) => { setPurgeTarget(trashId); setPurgePhrase('') },
+          onPurgeCancel: () => { setPurgeTarget(null); setPurgePhrase('') },
+          onPurge: (trashId) => { void purge(trashId, purgePhrase.trim()) },
         }) : null,
 
         tab === 'batch' ? h('div', { id: 'dc-panel-batch', role: 'tabpanel', 'aria-labelledby': 'dc-tab-batch', className: 'dc-panel' },
@@ -2404,7 +2468,8 @@ window.__ModuleLoader__.load({
     // guard changes the outcome.
     exports.__phraseMatches = phraseMatches
     exports.__httpFallbackError = httpFallbackError
-    exports.__overlaySeatState = () => ({ mounted: overlaySeatMounted })
+    exports.__overlaySeatState = () => ({ mounted: overlaySeatStore.mounted })
+    exports.__formatAgo = formatAgo
     return module.exports
   },
 })

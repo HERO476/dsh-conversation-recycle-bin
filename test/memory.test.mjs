@@ -574,3 +574,63 @@ test('restoreEntry: a memory bundle outside the recycle bin is refused before an
     await store.cleanup()
   }
 })
+
+// Export dies before `bundle.json` exists and the content cannot be moved back
+// either. The content is then the only copy and there is no bundle to restore
+// it from — so the adapter must leave a usable one, otherwise the entry can be
+// neither restored nor cleaned up.
+test('memory adapter: a failed export leaves a restorable rescue bundle', async () => {
+  const root = join(process.cwd(), 'test', '.tmp', `md-rescue-${Date.now()}`)
+  const store = join(root, 'store')
+  const trashDir = join(root, 'trash', 'entry-1')
+  try {
+    await mkdir(join(store, 'content'), { recursive: true })
+    await writeFile(join(store, 'content', 'a.md'), 'body-a', 'utf8')
+    await writeFile(join(store, '_index.json'), JSON.stringify({
+      schema: 2,
+      nodes: { n1: { session: SESSION_1, path: 'content/a.md' } },
+    }), 'utf8')
+
+    const realFs = await import('node:fs/promises')
+    let bundleWriteAttempts = 0
+    let moveBackBlocked = true
+    const fsApi = {
+      ...realFs,
+      async writeFile(file, data, encoding) {
+        if (String(file).endsWith('bundle.json')) {
+          bundleWriteAttempts += 1
+          // Only the export's own bundle write fails; the rescue one succeeds.
+          if (bundleWriteAttempts === 1) throw Object.assign(new Error('EPERM: not permitted'), { code: 'EPERM' })
+        }
+        return realFs.writeFile(file, data, encoding)
+      },
+      async rename(from, to) {
+        // Only the compensation's move-back fails (a backup holding the file);
+        // the later restore must be able to move it back for real.
+        if (moveBackBlocked && String(from).includes('files') && !String(to).includes('files')) {
+          moveBackBlocked = false
+          throw Object.assign(new Error('EBUSY: locked by a backup'), { code: 'EBUSY' })
+        }
+        return realFs.rename(from, to)
+      },
+    }
+
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'probe', label: 'probe', indexFile: join(store, '_index.json'),
+      rootDir: store, sessionField: 'session', nodesPointer: '/nodes', fsApi,
+    })
+    await assert.rejects(adapter.exportSession(SESSION_1, trashDir), (error) => error.code === 'E_MEMORY_FAILED')
+
+    // The rescue bundle exists and describes the file that stayed behind.
+    const rescue = JSON.parse(await readFile(join(trashDir, 'memory', 'probe', 'bundle.json'), 'utf8'))
+    assert.equal(rescue.entries.length, 1)
+    assert.equal(rescue.entries[0].nodeId, 'n1')
+    assert.equal(rescue.entries[0].storedFile, 'n1.content')
+
+    // A normal restore consumes it: the content file goes back to the store.
+    await adapter.restoreBundle(rescue)
+    assert.equal(await readFile(join(store, 'content', 'a.md'), 'utf8'), 'body-a')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
+  }
+})

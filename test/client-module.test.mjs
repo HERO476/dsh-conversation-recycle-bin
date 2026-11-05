@@ -1030,3 +1030,73 @@ test('client: every error code the Host can emit has a message in both locales',
     }
   }
 })
+
+// A restored entry that still holds memory files used to render no action at
+// all: the Host allows purge, the panel only knew about restore and discard.
+test('client module: an incomplete entry offers purge when the Host allows it', async () => {
+  const { exported } = await loadClient()
+  const IncompleteEntries = exported.__components.IncompleteEntries
+  const flatten = (node, out = []) => {
+    if (node === null || node === undefined || node === false || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+      for (const child of node) flatten(child, out)
+      return out
+    }
+    out.push(node)
+    flatten(node.children, out)
+    return out
+  }
+  const entry = {
+    trashId: 't9-restored',
+    sessionId: 'session-abc12345',
+    title: 'restored but holding memory',
+    status: 'restored',
+    updatedAt: 1,
+    memory: 0,
+    capabilities: { canRestore: false, canPurge: true, canDiscard: false, canForceDiscard: false },
+  }
+  const tree = IncompleteEntries({
+    entries: [entry],
+    discardTarget: null,
+    discardPhrase: '',
+    onPhrase: () => {},
+    onStart: () => {},
+    onCancel: () => {},
+    onDiscard: () => {},
+    onRestore: () => {},
+    restoreBusyId: null,
+    discardBusyId: null,
+    purgeTarget: null,
+    purgePhrase: '',
+    onPurgePhrase: () => {},
+    onPurgeStart: () => {},
+    onPurgeCancel: () => {},
+    onPurge: () => {},
+    purgeBusyId: null,
+  })
+  // The row has no restore (capability says no) and no plain discard (memory
+  // occupies it), so the ONLY action left is the purge this test is about.
+  const buttons = flatten(tree).filter((node) => typeof node?.type === 'function')
+  assert.equal(buttons.length, 1, 'exactly the purge action should be rendered')
+
+  // Without the capability the destructive action must stay hidden.
+  const withoutPurge = IncompleteEntries({
+    entries: [{ ...entry, capabilities: { canRestore: false, canPurge: false, canDiscard: false, canForceDiscard: false } }],
+    discardTarget: null, discardPhrase: '', onPhrase: () => {}, onStart: () => {}, onCancel: () => {},
+    onDiscard: () => {}, onRestore: () => {}, restoreBusyId: null, discardBusyId: null,
+    purgeTarget: null, purgePhrase: '', onPurgePhrase: () => {}, onPurgeStart: () => {},
+    onPurgeCancel: () => {}, onPurge: () => {}, purgeBusyId: null,
+  })
+  const noButtons = flatten(withoutPurge).filter((node) => typeof node?.type === 'function')
+  assert.equal(noButtons.length, 0, 'without canPurge the panel must not offer a destructive action')
+})
+
+test('client module: the background-sweep notice carries how long ago it ran', async () => {
+  const { exported } = await loadClient()
+  const now = Date.now()
+  assert.equal(exported.__formatAgo(now - 5_000, now), '刚刚')
+  assert.match(exported.__formatAgo(now - 30 * 60_000, now), /分钟前|min ago/)
+  assert.match(exported.__formatAgo(now - 3 * 3_600_000, now), /小时前|h ago/)
+  assert.match(exported.__formatAgo(now - 2 * 86_400_000, now), /天前|d ago/)
+  assert.equal(exported.__formatAgo(undefined, now), '')
+})
