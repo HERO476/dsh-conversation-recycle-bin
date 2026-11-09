@@ -3,6 +3,23 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.21] — 2026-11-09
+
+CI 第一次真正跑起来就抓到一条**只在中文机器上通过**的用例。0.3.20 发布后推送仓库，四个矩阵任务（ubuntu/windows × Node 22.15/24）全部在 `npm test` 阶段失败，失败点相同。
+
+### Fixed
+
+- **`client-module.test.mjs` 把中文写进了断言**（`the background-sweep notice carries how long ago it ran`）：`__formatAgo` 的「刚刚」被硬编码成字面量。`client.js` 的 `currentLocaleId()` 先读宿主的 `locale` 服务、读不到才回退 `navigator.language`，而这个用例没有安装 locale 服务，于是断言跟着**运行机器**的语言走——作者的中文 Windows 通过，所有英文 locale 的 CI 与贡献者机器都失败（`'just now' !== '刚刚'`）。这正是 0.3.17 修过的同一类缺陷：**测试没有锁定 locale，产品行为其实是对的**。
+- 现在这条用例对 `en` 与 `zh-CN` **各跑一遍**，每次通过新加的 `loadClientWithLocale()` 显式安装 locale 服务，并逐段断言「刚刚 / 30 分钟前 / 3 小时前 / 2 天前」与英文文案，顺手把两套字典的相对时间文案一起钉住。
+
+### Added
+
+- **CI 把失败摘要发布成 workflow annotation**：失败任务的原始日志需要仓库凭据才能读，只看到 `exit code 1` 无法区分「locale 相关的断言断错」和「夹具缺失」。`test` 步骤现在捕获输出，失败时把失败用例的名称、`expected`/`actual` 与所在文件行号以 `::error::` 注释发出，无需凭据即可读（本条缺陷就是这样定位的）。
+
+### Tests
+
+- 用例总数不变（221），`client-module.test.mjs` 32/32。
+
 ## [0.3.20] — 2026-11-09
 
 一次只改工程效率、不改删除语义的整理：把测试墙钟从 **60.5s 压到 4.6s**，堵住「跑过测试再打包」会把本机测试残留塞进 npm 包的路径，删掉三处零引用导出，并把两个确认前的**读**循环改成有界并发。生产路径的锁预算、超时与策略判定全部不变。

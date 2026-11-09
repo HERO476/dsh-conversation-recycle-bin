@@ -81,6 +81,32 @@ async function loadClient({ withReactDom = false } = {}) {
   return { exported, registrations, style, moduleId, body, portalCalls }
 }
 
+/**
+ * Load the Client with an explicit active locale.
+ *
+ * `client.js` resolves the locale from the host's `locale` service and only
+ * then falls back to `navigator.language`, so a suite that just calls
+ * `loadClient()` silently follows whatever language the MACHINE is set to.
+ * That is how a Chinese literal in an assertion passed on a zh-CN laptop and
+ * failed on every English-locale CI runner. Anything that asserts user-visible
+ * text must pin the locale here instead.
+ */
+async function loadClientWithLocale(localeId) {
+  const { exported } = await loadClient()
+  exported.apply({
+    slots: {
+      inject(key, callback) { return callback() ?? (() => {}) },
+      register() { return () => {} },
+    },
+    effect(fn) { fn() },
+    get(name) {
+      if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+      return undefined
+    },
+  })
+  return exported
+}
+
 test('client: module id equals the package name the boot graph keys rows by', async () => {
   const { moduleId } = await loadClient()
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
@@ -1092,11 +1118,22 @@ test('client module: an incomplete entry offers purge when the Host allows it', 
 })
 
 test('client module: the background-sweep notice carries how long ago it ran', async () => {
-  const { exported } = await loadClient()
   const now = Date.now()
-  assert.equal(exported.__formatAgo(now - 5_000, now), '刚刚')
-  assert.match(exported.__formatAgo(now - 30 * 60_000, now), /分钟前|min ago/)
-  assert.match(exported.__formatAgo(now - 3 * 3_600_000, now), /小时前|h ago/)
-  assert.match(exported.__formatAgo(now - 2 * 86_400_000, now), /天前|d ago/)
-  assert.equal(exported.__formatAgo(undefined, now), '')
+  // Both languages, each with an explicitly installed locale service: a single
+  // Chinese literal here (`'刚刚'`) made this assertion depend on the machine's
+  // `navigator.language`, so it failed on every English-locale runner while
+  // passing on the author's zh-CN laptop. Pinning both tables also proves the
+  // relative-time wording exists on both sides.
+  const cases = [
+    ['en', { justNow: 'just now', minutes: /^30 min ago$/, hours: /^3 h ago$/, days: /^2 d ago$/ }],
+    ['zh-CN', { justNow: '刚刚', minutes: /^30 分钟前$/, hours: /^3 小时前$/, days: /^2 天前$/ }],
+  ]
+  for (const [localeId, expected] of cases) {
+    const client = await loadClientWithLocale(localeId)
+    assert.equal(client.__formatAgo(undefined, now), '', `${localeId}: no timestamp renders nothing`)
+    assert.equal(client.__formatAgo(now - 5_000, now), expected.justNow, `${localeId}: seconds`)
+    assert.match(client.__formatAgo(now - 30 * 60_000, now), expected.minutes, `${localeId}: minutes`)
+    assert.match(client.__formatAgo(now - 3 * 3_600_000, now), expected.hours, `${localeId}: hours`)
+    assert.match(client.__formatAgo(now - 2 * 86_400_000, now), expected.days, `${localeId}: days`)
+  }
 })
