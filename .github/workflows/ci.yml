@@ -5,9 +5,12 @@ name: CI
 # audit in this repository was a manual `npm test` on the author's machine.
 #
 # The package has no runtime or dev dependencies, so there is no install step —
-# checkout and run. Windows is in the matrix on purpose: the path handling,
-# `EBUSY`-tolerant cleanup and `.zstd` session log layout all have platform
-# branches that a Linux-only run never exercises.
+# checkout and run.
+#
+# The matrix is deliberately wide. Windows is not a formality: path handling,
+# `EBUSY`-tolerant cleanup and the `.zstd` session log layout all have platform
+# branches that a Linux-only run never exercises. Node 22.15 is the floor
+# `package.json#engines` promises.
 
 on:
   push:
@@ -43,9 +46,38 @@ jobs:
         run: npm run check
 
       # Every suite; the runner keeps going after a failing file so one red
-      # suite never hides the state of the other nine.
+      # suite never hides the state of the other nine. The run is captured so a
+      # failure can be published as a workflow annotation — the raw log is only
+      # reachable with repository credentials, and "exit code 1" alone is not
+      # enough to tell a locale-dependent assertion from a missing fixture.
       - name: test
-        run: npm test
+        shell: bash
+        run: |
+          set +e
+          npm test > test.log 2>&1
+          status=$?
+          cat test.log
+          if [ "$status" -ne 0 ]; then
+            FAILED_LOG=test.log node - <<'JS'
+          const fs = require('node:fs')
+          const lines = fs.readFileSync(process.env.FAILED_LOG, 'utf8').split(/\r?\n/)
+          // Keep the failing tests and the diagnostics that follow them; drop
+          // the passing bulk so the annotation stays readable.
+          const keep = []
+          let capturing = false
+          for (const line of lines) {
+            if (/^\s*(✖|not ok)\b/.test(line)) { capturing = true; keep.push(line); continue }
+            if (/^\s*▶/.test(line)) { capturing = false; keep.push(line); continue }
+            if (capturing) keep.push(line)
+            if (/failed:/.test(line)) keep.push(line)
+          }
+          const detail = (keep.length > 0 ? keep : lines.slice(-60)).join('\n')
+          const cut = detail.length > 6000 ? `${detail.slice(0, 6000)}\n…(truncated)` : detail
+          const escape = (text) => text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+          console.log(`::error file=.github/workflows/ci.yml,title=${process.platform} node ${process.version} test failure::${escape(cut)}`)
+          JS
+          fi
+          exit "$status"
 
       # A packaged artifact must never carry `test/.tmp` fixtures. Two layers are
       # checked separately so neither can hide the other's failure:
