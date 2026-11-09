@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.3.19`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.3.20`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 运行要求：**Node.js ≥ 22.15**（Host 侧用到 `readdir(..., { recursive: true })`、`AbortSignal` 等 22.x 行为），DSH `>=0.2.1-rc.2 <0.3.0-0`（`package.json` 的 `engines.dsh` 已如实声明，DSH 安装校验会据此拒绝范围外版本；上界是刻意的：0.2.2 与 0.3.x 之间没有承诺兼容）。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -236,7 +236,7 @@ dsh-conversation-recycle-bin/
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 188 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 221 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
 ```
 
 ---
@@ -245,7 +245,7 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # 依次跑 test/*.test.mjs（10 个文件、200 个用例）；任一失败仍会跑完全部再汇总
+npm test        # 依次跑 test/*.test.mjs（10 个文件、221 个用例）；任一失败仍会跑完全部再汇总
 npm run check   # 语法 + manifest
 node scripts/verify-host-contract.mjs http://127.0.0.1:3082 --token=<token>   # 宿主已启动时的运行时探针（boot 图 + /api/state）
 ```
@@ -362,7 +362,7 @@ node -e "console.log('b64:' + Buffer.from('your-feedback@example.com','utf8').to
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
 npm run check                      # 语法 + manifest（含 feedback.js）
 node test/feedback.test.mjs        # 20 个反馈用例
-npm test                           # 全量 200 个用例
+npm test                           # 全量 221 个用例
 
 # 端到端：用本机收件桩观察真实投递路径，不外发邮件
 $env:DSH_CRB_MAIL_API_URL   = 'http://127.0.0.1:9099/emails'

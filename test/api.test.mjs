@@ -49,6 +49,7 @@ async function makeFixture({
   mutationLock = null,
   connection = null,
   clock = null,
+  planBudget = null,
 } = {}) {
   const home = await makeTempHome()
   const workspaceRegistry = makeWorkspaceRegistry([
@@ -135,6 +136,12 @@ async function makeFixture({
     // is covered by `connection: a Host without a connection service refuses
     // by default`.
     requireConnection: connection !== null,
+    // The foreign-writer grace window is a fixed sleep inside every hard
+    // delete, so paying the production 1.5 s in ~10 unrelated tests bought
+    // nothing but wall time. The two tests that actually exercise the window
+    // build `createSessionLogOps` directly with their own value (and a stub
+    // `delay`), so they are unaffected by this default.
+    foreignWriterGraceMs: 0,
     ...configOverrides,
   }).value
   const paths = resolveDataPaths(home.root)
@@ -146,6 +153,7 @@ async function makeFixture({
     ...(clock === null ? {} : { now: clock }),
     logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
     mutationLock,
+    ...(planBudget === null ? {} : { planBudget }),
   })
   return { home, api, config, paths, services, workspaceRegistry, seeded, memoryRoot, logs, items }
 }
@@ -927,9 +935,15 @@ test('mutation lock: a busy cross-process lock is E_LOCK_BUSY, not a corrupted m
   const lockPath = join(process.cwd(), 'test', '.tmp', `mutation-busy-${randomBytes(6).toString('hex')}.lock`)
   const holder = createFileLock({ lockPath, timeoutMs: 2_000, staleMs: 60_000, retryMs: 10 })
   const fixture = await makeFixture({
-    // A short wait budget keeps the test fast; production waits 30s because a
+    // A short wait budget keeps the test fast; production waits 31s because a
     // deletion transaction legitimately takes a while.
     mutationLock: createFileLock({ lockPath, timeoutMs: 60, staleMs: 60_000, retryMs: 10 }),
+    // `/delete` used to derive its own lock budget (15s + 16s/item + drain) and
+    // hand it to `serialize()`, overriding the lock's own timeout — so this
+    // test sat on the whole 33s budget just to observe E_LOCK_BUSY. The budget
+    // is now injectable, and `liveDrainMs: 0` removes the last fixed slice.
+    planBudget: { baseMs: 40, perItemMs: 20, capMs: 200 },
+    configOverrides: { liveDrainMs: 0 },
   })
   const release = await holder.acquire()
   try {

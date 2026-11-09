@@ -3,6 +3,40 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.20] — 2026-11-09
+
+一次只改工程效率、不改删除语义的整理：把测试墙钟从 **60.5s 压到 4.6s**，堵住「跑过测试再打包」会把本机测试残留塞进 npm 包的路径，删掉三处零引用导出，并把两个确认前的**读**循环改成有界并发。生产路径的锁预算、超时与策略判定全部不变。
+
+### Changed
+
+- **`/delete` 的锁预算改为可注入、且与 `preview` 共用一份计算**（`PLAN_LOCK_BUDGET` + `planLockBudgetMs()`）：这两处过去是同一算式抄了两份（`preview` 发布 `limits.planTimeoutMs`，`/delete` 用它当跨进程锁超时），一处调参另一处很容易漏。生产默认值不变（15s 基数 + 每会话 16s + 每个 live 会话一个 drain 窗口，上限 900s）；测试可传 `planBudget` 把预算降到毫秒级。
+- **`preview` / `deletePlan` 的预检改为有界并发（8）**：`inspect()` 只读（persistence stat + 投影 + 缓存列表），50 项批量过去要串行付 50 次往返。**执行**循环仍是严格串行——只有读并发。
+- **`gateway.loadList()` 加单飞 + 代际号**：预检并发后，冷启动时多个 `inspect()` 会同时触发列表构建；现在只有第一个真正构建，其余复用同一个 Promise。`invalidate()` 会递增代际并丢弃在飞的构建结果，保证「1.5s 缓存窗口内 pin 后删除」的既有修复不因并发回退。
+- **`/sessions` 去掉第二趟投影读**：`enrichTitles()` 会对「标题仍为空」的行再读一遍 `buildList()` 刚读过的同一批投影文件，且只补前 80 行。`createdAt` 现在由 `buildList()` 在唯一那次读里补齐，`enrichTitles()` 整个删除。
+- **`files` 收紧为 `test/*.mjs`**：过去是整个 `test/` 目录，而 npm 的 `files` 白名单优先于 `.gitignore`，于是 `npm test` 之后 `npm pack` 会把 `test/.tmp/` 里的会话日志、记忆索引和 `mutation-busy-*.lock` 打进包——同一个 commit 打两次包 shasum 不同。新增 `scripts/clean-tmp.mjs`（`prepack` 钩子）作为第二道防线，失败只告警不阻断发布。
+- **`config.schema.json` / 语义不变**：本版没有新增或改动任何配置键。
+
+### Removed
+
+| 符号 | 位置 | 状态 |
+|---|---|---|
+| `ok()` | `lib/core/errors.js` | 零引用（`toWireError` 才是失败态唯一出口） |
+| `defaultConfig()` | `lib/core/config.js` | 零引用；连带删除只被它使用的 `clone()` |
+| `writeJsonAtomic()` | `lib/host/paths.js` | 零引用；连带从 import 里去掉 `writeFile` |
+| `enrichTitles()` | `lib/host/gateway.js` | 功能已并入 `buildList()`，见上 |
+
+### Added
+
+- **`.github/workflows/ci.yml`**：此前仓库没有任何 CI，所有审计都是手工 `npm test`。现在 push/PR 会在 ubuntu + windows × Node 22.15/24 上跑 `npm run check`、`npm test`，并额外断言打包产物不含 `test/.tmp`。包无任何依赖，因此没有安装步骤。
+
+### Tests
+
+- 用例总数不变（**221**，10 个文件），`api.test.mjs` 70/70 全过。
+- **全量墙钟 60.5s → 4.6s；`api.test.mjs` 59.3s → 3.5s**，来自两处固定等待被消除：
+  - 「busy cross-process lock」用例过去被 `/delete` 的 33s 预算卡住（用例自己注入的 60ms `timeoutMs` 被路由参数覆盖）→ 现在注入 `planBudget` + `liveDrainMs: 0`，压到毫秒级；
+  - fixture 默认 `foreignWriterGraceMs: 0`，9 个 hard-delete 用例不再各付 1.5s 固定宽限。真正验证该窗口的两条用例仍直接构造 `createSessionLogOps({ foreignWriterGraceMs: 120/40, delay })`，语义未被稀释。
+- README 的三处用例数（188 / 200 / 200）统一为实际的 **221**。
+
 ## [0.3.19] — 2026-11-05
 
 平台审计（架构 / 安全 / 验收三方独立复审 v0.3.18）之后的修复。三方从不同角度撞到同一处：**记忆残留的条目在 UI/API 上没有任何出口**；另有一条把瞬时读失败当永久不可恢复。

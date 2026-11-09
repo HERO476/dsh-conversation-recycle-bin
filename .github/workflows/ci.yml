@@ -1,0 +1,76 @@
+name: CI
+
+# The suites are the only thing standing between a refactor and somebody's
+# deleted conversation, and until now nothing ran them automatically: every
+# audit in this repository was a manual `npm test` on the author's machine.
+#
+# The package has no runtime or dev dependencies, so there is no install step —
+# checkout and run. Windows is in the matrix on purpose: the path handling,
+# `EBUSY`-tolerant cleanup and `.zstd` session log layout all have platform
+# branches that a Linux-only run never exercises.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.15', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # Syntax of every shipped file + the manifest/config contract.
+      - name: check (syntax + manifest)
+        run: npm run check
+
+      # Every suite; the runner keeps going after a failing file so one red
+      # suite never hides the state of the other nine.
+      - name: test
+        run: npm test
+
+      # A packaged artifact must never carry `test/.tmp` fixtures. Two layers are
+      # checked separately so neither can hide the other's failure:
+      #   1. `files: ["test/*.mjs"]` must exclude the directory on its own, so
+      #      the probe below is created and packed with `--ignore-scripts`
+      #      (i.e. without `prepack` cleaning it up first);
+      #   2. `prepack` must then remove the leftovers.
+      - name: pack (no fixtures in the tarball)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test/.tmp/probe
+          echo x > test/.tmp/probe/session.jsonl
+          echo x > test/.tmp/probe.lock
+          npm pack --dry-run --json --ignore-scripts > pack.json
+          node -e "
+            const fs = require('fs');
+            const raw = fs.readFileSync('pack.json', 'utf8');
+            const manifest = JSON.parse(raw.slice(raw.indexOf('[{')))[0];
+            const leaked = manifest.files.map((f) => f.path).filter((p) => p.startsWith('test/.tmp'));
+            if (leaked.length > 0) {
+              console.error('test fixtures leaked into the tarball:', leaked);
+              process.exit(1);
+            }
+            console.log('tarball ok:', manifest.entryCount, 'files, no test/.tmp');
+          "
+          npm run prepack
+          test ! -e test/.tmp/probe
