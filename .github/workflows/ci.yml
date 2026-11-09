@@ -116,24 +116,30 @@ jobs:
       #      the probe below is created and packed with `--ignore-scripts`
       #      (i.e. without `prepack` cleaning it up first);
       #   2. `prepack` must then remove the leftovers.
+      # `set -x` is on and the whole step is captured: anything that fails here
+      # is CI plumbing, and its trace is what the annotation reports.
       - name: pack (no fixtures in the tarball)
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p test/.tmp/probe
-          echo x > test/.tmp/probe/session.jsonl
-          echo x > test/.tmp/probe.lock
-          npm pack --dry-run --json --ignore-scripts > pack.json
-          node -e "
-            const fs = require('fs');
-            const raw = fs.readFileSync('pack.json', 'utf8');
-            const manifest = JSON.parse(raw.slice(raw.indexOf('[{')))[0];
-            const leaked = manifest.files.map((f) => f.path).filter((p) => p.startsWith('test/.tmp'));
-            if (leaked.length > 0) {
-              console.error('::error file=.github/workflows/ci.yml,title=packed fixtures::' + leaked.join(' '));
-              process.exit(1);
-            }
-            console.log('tarball ok:', manifest.entryCount, 'files, no test/.tmp');
-          "
-          npm run prepack
-          test ! -e test/.tmp/probe
+          set +e
+          {
+            set -euxo pipefail
+            mkdir -p test/.tmp/probe
+            echo x > test/.tmp/probe/session.jsonl
+            echo x > test/.tmp/probe.lock
+            npm pack --dry-run --json --ignore-scripts > pack.json
+            if grep -Eq '"path"[[:space:]]*:[[:space:]]*"test/\.tmp' pack.json; then
+              echo 'tarball contains test/.tmp entries:'
+              grep -E '"path"[[:space:]]*:[[:space:]]*"test/\.tmp' pack.json
+              exit 1
+            fi
+            echo 'tarball ok: no test/.tmp entries'
+            npm run prepack
+            test ! -e test/.tmp/probe
+          } > pack-step.log 2>&1
+          status=$?
+          cat pack-step.log
+          if [ "$status" -ne 0 ]; then
+            node "$RUNNER_TEMP/annotate.js" pack-step.log pack "$RUNNER_OS" "$(node --version)"
+          fi
+          exit "$status"
