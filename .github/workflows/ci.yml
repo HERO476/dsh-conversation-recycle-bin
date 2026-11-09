@@ -9,8 +9,9 @@ name: CI
 #
 # The matrix is deliberately wide. Windows is not a formality: path handling,
 # `EBUSY`-tolerant cleanup and the `.zstd` session log layout all have platform
-# branches that a Linux-only run never exercises. Node 22.15 is the floor
-# `package.json#engines` promises.
+# branches that a Linux-only run never exercises, and the fixtures are shaped
+# like a Windows DSH home. Node 22.15 is the floor `package.json#engines`
+# promises.
 
 on:
   push:
@@ -41,15 +42,62 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # A failing step's raw log needs repository credentials to read, so a red
+      # build used to report nothing but "exit code 1" — not enough to tell a
+      # locale-dependent assertion from a missing fixture. This helper turns the
+      # captured output into a workflow annotation, which is readable without
+      # credentials. It lives in RUNNER_TEMP on purpose: it is CI plumbing, not
+      # part of the published package.
+      - name: annotation helper
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/annotate.js" <<'JS'
+          const fs = require('node:fs')
+
+          const [logPath, stepName, platform, nodeVersion] = process.argv.slice(2)
+          let text
+          try {
+            text = fs.readFileSync(logPath, 'utf8')
+          } catch (error) {
+            console.log(`::error file=.github/workflows/ci.yml,title=${stepName}: ${platform} node ${nodeVersion}::could not read ${logPath}: ${error.message}`)
+            process.exit(0)
+          }
+
+          const lines = text.split(/\r?\n/)
+          // Every place that says "something failed": the per-test TAP line, the
+          // per-file runner verdict, and the summary counter. Keep the ~50 lines
+          // before each, which is where the expectation/stack lives.
+          const marks = []
+          lines.forEach((line, index) => {
+            if (/^\s*(not ok |✖ )/.test(line) || /(ℹ|#) fail [1-9]/.test(line) || /^\s*failed:/.test(line)) marks.push(index)
+          })
+
+          const keep = new Set()
+          const anchors = marks.length > 0 ? marks : [lines.length - 1]
+          for (const index of anchors) {
+            for (let i = Math.max(0, index - 50); i <= Math.min(lines.length - 1, index + 2); i += 1) keep.add(i)
+          }
+          const detail = [...keep].sort((a, b) => a - b).map((i) => lines[i]).join('\n')
+          const cut = detail.length > 12000 ? `${detail.slice(0, 12000)}\n…(truncated)` : detail
+          const escape = (value) => value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+          console.log(`::error file=.github/workflows/ci.yml,title=${stepName} failed: ${platform} node ${nodeVersion}::${escape(cut)}`)
+          JS
+
       # Syntax of every shipped file + the manifest/config contract.
       - name: check (syntax + manifest)
-        run: npm run check
+        shell: bash
+        run: |
+          set +e
+          npm run check > check.log 2>&1
+          status=$?
+          cat check.log
+          if [ "$status" -ne 0 ]; then
+            node "$RUNNER_TEMP/annotate.js" check.log check "$RUNNER_OS" "$(node --version)"
+          fi
+          exit "$status"
 
       # Every suite; the runner keeps going after a failing file so one red
-      # suite never hides the state of the other nine. The run is captured so a
-      # failure can be published as a workflow annotation — the raw log is only
-      # reachable with repository credentials, and "exit code 1" alone is not
-      # enough to tell a locale-dependent assertion from a missing fixture.
+      # suite never hides the state of the other nine.
       - name: test
         shell: bash
         run: |
@@ -58,24 +106,7 @@ jobs:
           status=$?
           cat test.log
           if [ "$status" -ne 0 ]; then
-            FAILED_LOG=test.log node - <<'JS'
-          const fs = require('node:fs')
-          const lines = fs.readFileSync(process.env.FAILED_LOG, 'utf8').split(/\r?\n/)
-          // Keep the failing tests and the diagnostics that follow them; drop
-          // the passing bulk so the annotation stays readable.
-          const keep = []
-          let capturing = false
-          for (const line of lines) {
-            if (/^\s*(✖|not ok)\b/.test(line)) { capturing = true; keep.push(line); continue }
-            if (/^\s*▶/.test(line)) { capturing = false; keep.push(line); continue }
-            if (capturing) keep.push(line)
-            if (/failed:/.test(line)) keep.push(line)
-          }
-          const detail = (keep.length > 0 ? keep : lines.slice(-60)).join('\n')
-          const cut = detail.length > 6000 ? `${detail.slice(0, 6000)}\n…(truncated)` : detail
-          const escape = (text) => text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
-          console.log(`::error file=.github/workflows/ci.yml,title=${process.platform} node ${process.version} test failure::${escape(cut)}`)
-          JS
+            node "$RUNNER_TEMP/annotate.js" test.log test "$RUNNER_OS" "$(node --version)"
           fi
           exit "$status"
 
@@ -99,7 +130,7 @@ jobs:
             const manifest = JSON.parse(raw.slice(raw.indexOf('[{')))[0];
             const leaked = manifest.files.map((f) => f.path).filter((p) => p.startsWith('test/.tmp'));
             if (leaked.length > 0) {
-              console.error('test fixtures leaked into the tarball:', leaked);
+              console.error('::error file=.github/workflows/ci.yml,title=packed fixtures::' + leaked.join(' '));
               process.exit(1);
             }
             console.log('tarball ok:', manifest.entryCount, 'files, no test/.tmp');
