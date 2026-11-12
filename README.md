@@ -2,7 +2,7 @@
 
 给 DeepSeek Harness (DSH) Web 增加「删除对话」：会话列表的「…」菜单与会话详情页头部各有一个删除入口；确认框内可勾选「同时删除关联记忆」（默认不勾选），并实时显示将被影响的记忆条数。删除默认进入插件回收站，可恢复；每次操作写入审计日志；批量删除有上限与限流，批量软删除需输入数量，彻底删除一键执行；事务任一步失败即回滚。
 
-> 状态：`0.3.21`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
+> 状态：`0.3.22`，Host + Web Client 双半，零构建（plain JS ESM），只依赖宿主已发布的公开扩展点。
 > 运行要求：**Node.js ≥ 22.15**（Host 侧用到 `readdir(..., { recursive: true })`、`AbortSignal` 等 22.x 行为），DSH `>=0.2.1-rc.2 <0.3.0-0`（`package.json` 的 `engines.dsh` 已如实声明，DSH 安装校验会据此拒绝范围外版本；上界是刻意的：0.2.2 与 0.3.x 之间没有承诺兼容）。
 > 包名：`dsh-conversation-recycle-bin`（原 `dsh-delete-conversation` 因 npm 被他人占用而改名，见 CHANGELOG 0.2.0）。
 > 本 README 同时是设计说明与验收依据；安装/回滚步骤见 [INSTALL.md](INSTALL.md)；变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -126,6 +126,10 @@ memory  →  messages  →  session/catalog
 
 反代部署（`dsh web --public-url https://host/ui/`）时，代理会把外部主机名放进 `Host`，插件的回环校验会以 `E_FORBIDDEN_HOST` 拒绝。用 `allowedHosts` 精确放行，而不是把 `allowNonLoopback` 整体打开：
 
+> **红线（0.3.22 起）**：`allowedHosts` 只用于**已知**的反向代理。当前宿主会认证**非 owner peer**（远程访问授权），而 `requestRejection` 只回答「认证与否」；一旦把本路由经代理/隧道暴露出去，这种 peer 也能删除会话。对外暴露时**同时打开 `requireOwnerPeer: true`**（插件会向 connection 层索取 principal，非 owner 与「取不到 principal」一律拒绝）。
+>
+> 另两条边界：桌面端壳会把宿主 cookie 注入 renderer 并向本路由转发任意路径，因此**UI 内的任意脚本（含第三方 UI 插件）与面板同权**；`dsh-app://app` 的 origin 豁免在当前宿主已不可达（桌面壳改用 `http://127.0.0.1:<port>` 开窗），保留该分支只是纵深防御。
+
 | 配置 | 匹配 | 说明 |
 |---|---|---|
 | `allowedHosts: ["app.example"]` | 该主机的任意端口 | 端口在代理侧固定时更宽松 |
@@ -162,6 +166,7 @@ memory  →  messages  →  session/catalog
 | `requireConnection` | `true` | 必须拿到宿主的 `connection.requestRejection` 才接受路由，否则一律 401 `E_UNAUTHORIZED`。见 §4.2 最后一行。 |
 | `requireSameOrigin` | `true` | 校验 `Origin`/`Sec-Fetch-Site`。 |
 | `allowNonLoopback` | `false` | 跳过 Host 回环校验。**打开它会让 `allowedHosts` 失效**，只在完全信任本机所有进程时使用。 |
+| `requireOwnerPeer` | `false` | 仅宿主所有者可执行破坏性路由。需要对外暴露（代理/隧道）时打开；开启后非 owner 与「取不到 principal」都会被拒绝（fail-closed）。 |
 | `allowedHosts` | `[]` | 反代/自定义主机名白名单（`host` 或 `host:port`，最多 32 条）。暴露到 loopback 之外应只配置这一项。 |
 | `allowOrphanSessions` | `false` | 允许删除未登记到任何工作区的会话（默认按 `E_POLICY_ORPHAN` 拒绝）。 |
 | `allowSubagentSessions` | `false` | 允许删除子代理会话（默认按 `E_POLICY_SUBAGENT` 拒绝，避免拆掉正在工作的子会话）。 |

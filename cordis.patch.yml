@@ -28,6 +28,13 @@
         # every key the contract has.
         requireConnection: true
         allowNonLoopback: false
+        # Owner-only mode. `requestRejection` answers authenticated-or-not only;
+        # a Host that authenticates non-owner peers (remote-access grants) would
+        # otherwise let them delete conversations once this route is exposed
+        # through a proxy. When true the plugin asks the connection layer for the
+        # principal and refuses anything that is not the owner — including an
+        # unknown principal (fail-closed). Keep false on loopback-only setups.
+        requireOwnerPeer: false
         # Reverse-proxy deployments: list the exact authorities the proxy puts
         # in `Host` (host, host:port). A bare host admits any port. Listing them
         # is narrower than turning allowNonLoopback on for every hostname.

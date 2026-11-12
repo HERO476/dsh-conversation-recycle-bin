@@ -81,12 +81,81 @@ test('gateway: the per-session projection (v7) supplies the title when the legac
   })
 })
 
-test('gateway: an unknown projection version degrades to no title instead of misreading fields', async () => {
+test('gateway: a bumped projection version with the same fields still supplies the title', async () => {
+  // 0.3.22 reversed the old `version !== 7 → give up` rule. A Host that bumps
+  // the format while keeping `rows.title.val` / `rows.sessionListMetadata.val`
+  // must NOT cost every row its title — the previous expectation baked that
+  // degradation in, so a real drift would have shipped green.
   await withFixture(8, async ({ paths, ctx }) => {
     const gateway = createSessionGateway({ ctx, paths, now: () => 1_700_000_000_200 })
     const rows = await gateway.list()
     assert.equal(rows.length, 1)
+    assert.equal(rows[0].title, 'Projection title')
+    // ...and the foreign version is reported instead of silently accepted.
+    assert.equal(gateway.diagnostics().projection.foreignVersion, 1)
+  })
+})
+
+test('gateway: an unreadable projection shape degrades to no title AND is reported', async () => {
+  await withFixture(8, async ({ paths, ctx }) => {
+    // Same version, different field names: the capability check must reject it.
+    await writeFile(join(paths.storagesDir, 'session_projcache', 'sessions', `${SESSION_ID}.json`),
+      JSON.stringify({ version: 8, record: { rows: { headline: { val: 'Renamed field' } } } }), 'utf8')
+    const gateway = createSessionGateway({ ctx, paths, now: () => 1_700_000_000_300 })
+    const rows = await gateway.list()
     assert.equal(rows[0].title, '')
+    assert.equal(gateway.diagnostics().projection.malformed, 1)
+  })
+})
+
+function legacyTable(version, title) {
+  return JSON.stringify({
+    unit: { name: 'session_projcache', version },
+    global: null,
+    tables: {
+      sessions: {
+        [SESSION_ID]: {
+          identity: { createdAt: 1_600_000_000_000, cwd: '/work/a' },
+          rows: { title: { val: title }, sessionListMetadata: { val: { blank: false } } },
+        },
+      },
+    },
+  })
+}
+
+test('gateway: a legacy bulk table whose unit.version is unknown is skipped, not trusted', async () => {
+  await withFixture(7, async ({ paths, ctx }) => {
+    // The legacy file is the FALLBACK, so remove the authoritative checkpoint
+    // to make the legacy read the only title source.
+    await rm(join(paths.storagesDir, 'session_projcache', 'sessions', `${SESSION_ID}.json`), { force: true })
+    await writeFile(join(paths.storagesDir, 'session_projcache.json'), legacyTable(99, 'Legacy title'), 'utf8')
+    const gateway = createSessionGateway({ ctx, paths, now: () => 1_700_000_000_500 })
+    const rows = await gateway.list()
+    assert.equal(rows[0].title, '')
+    assert.equal(gateway.diagnostics().legacyTitles, 'v99')
+  })
+})
+
+test('gateway: the per-record checkpoint outranks a stale legacy title', async () => {
+  await withFixture(7, async ({ paths, ctx }) => {
+    // The legacy dump is frozen at the migration moment; the conversation was
+    // renamed afterwards. The authoritative checkpoint must win.
+    await writeFile(join(paths.storagesDir, 'session_projcache.json'), legacyTable(3, 'Old name'), 'utf8')
+    const gateway = createSessionGateway({ ctx, paths, now: () => 1_700_000_000_600 })
+    const rows = await gateway.list()
+    assert.equal(rows[0].title, 'Projection title')
+    assert.equal(gateway.diagnostics().legacyTitles, 'v3')
+  })
+})
+
+test('gateway: the legacy bulk table still titles a row with no checkpoint on disk', async () => {
+  await withFixture(7, async ({ paths, ctx }) => {
+    await rm(join(paths.storagesDir, 'session_projcache', 'sessions', `${SESSION_ID}.json`), { force: true })
+    await writeFile(join(paths.storagesDir, 'session_projcache.json'), legacyTable(3, 'Legacy title'), 'utf8')
+    const gateway = createSessionGateway({ ctx, paths, now: () => 1_700_000_000_700 })
+    const rows = await gateway.list()
+    assert.equal(rows[0].title, 'Legacy title')
+    assert.equal(rows[0].createdAt, 1_600_000_000_000)
   })
 })
 

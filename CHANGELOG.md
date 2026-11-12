@@ -3,6 +3,32 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.22] — 2026-11-12
+
+对**当前最新宿���**（`@deepseek-ai/dsh-desktop-runtime` **0.2.2-rc.1**，桌面端与 `dsh web` 共用）的三方只读评审（架构 / 安全 / 验收）之后的修复。评审结论是「宿主契约没有硬断裂，但有一处安装门禁错误、一处标题优先级倒置、一处脱敏缺口」；本版把这四项 P0 与两项 P1 全部闭合，并给出一条可复核的运行态探针。
+
+### Fixed
+
+- **`engines.dsh` 匹配不了当前宿主**（评审 H1）：按 semver 预发布规则，区间 `>=0.2.1-rc.2 <0.3.0-0` 的比较器元组是 0.2.1 与 0.3.0，而候选是 `0.2.2-rc.1` —— **没有任何 `0.2.2` 元组带预发布**，因此不满足，全新的 `npm i` 会被引擎门禁拒绝（本机只因 `link:` 安装而照跑）。range 现补上 `|| >=0.2.2-0 <0.3.0-0`。
+- **标题来源优先级倒置**（评审 H2）：旧整表 `storages/session_projcache.json`（实测 `unit.version: 3`，宿主早已停写）被无条件当作标题源，权威 per-record 检查点只在「标题为空」时兜底。后果是**迁移之后改过名的会话永远显示迁移时的旧标题**。现在 per-record 是唯一权威（对每行都读），旧整表只填空缺，且受 `unit.version === 3` 版本钉约束（未知版本跳过并记诊断）。
+- **`version !== 7` 的一刀切被换成能力探测**（评审 R1/T1）：宿主把投影版本从 7 提到 8、但字段形状不变时，旧逻辑让**每一行都丢掉标题**，而 `test/contract.test.mjs` 把「v8 → 空标题」断言成了期望行为，于是真漂移也不会红。现在按实际字段（`rows.title.val` / `rows.sessionListMetadata.val`）探测：形状对就照读并计入 `diagnostics.projection.foreignVersion`，形状不对才降级并计入 `malformed`。
+- **`/state` 把 adapter 原始异常原样回传**（评审 S1）：`reason` 直接来自 `error.message`（ENOENT/EPERM 会带绝对路径），而 `/state` 是**成功响应**、从未过 `redactDetails`，且在没有 `connection` 服务时经 `isStateProbe` **免鉴权**返回 —— 与插件自述「路径不跨 HTTP 边界」直接冲突。现在整个 `/state` 载荷在出口过 `redactDetails`。
+- **`verify-host-contract.mjs` 会假通过**（评审 M4）：判据是 HTML 里出现包名字符串，而包名本来就是 profile 依赖键；默认端口还写死 3082。现在判据改为 `state.version` + `state.limits` 形状，端口取自参数或 `$DSH_WEB_URL`，并新增一条投影格式诊断断言。
+
+### Added
+
+- **`requireOwnerPeer`（默认 false）**：`requestRejection` 只回答「认证与否」，而当前宿主还能认证**非 owner peer**（远程访问授权）。一旦为反向代理/隧道配置了 `allowedHosts`，这种 peer 就能删会话、purge 回收站。开启后插件向 connection 层索取 principal，非 owner 一律 403 `E_FORBIDDEN_PRINCIPAL`，拿不到 principal 也拒绝（`E_PEER_UNKNOWN`，fail-closed）；关闭时行为与 0.3.21 完全一致。
+- **`/state.diagnostics`**：`{ projection: { total, foreignVersion, malformed, unreadable }, legacyTitles }`，让「标题为什么没了」变成可观测数据，而不是空白行。
+
+### Docs
+
+- README 安全声明补三条红线：`allowedHosts` 只用于**已知**代理且建议同时开 `requireOwnerPeer`；桌面端壳会替 renderer 注入 cookie 并转发任意路径，故 UI 内任意脚本（含第三方插件）与面板同权；`dsh-app://app` origin 豁免在当前宿主已不可达（桌面壳改用 `http://127.0.0.1:port`），保留分支纯属纵深防御。
+- 评审记录：本版未因评审而改变的两个设计取舍 —— hard 模式批量删除不需要短语（既有文档化行为，soft 批量才需要）、`/sessions` 仍返回 `cwd`（Client 用于显示；仅在对外暴露时才有意义）。
+
+### Tests
+
+- 用例 221 → **229**：新增 v8-字段不变仍出标题、字段改名降级且计数、旧整表未知版本跳过、per-record 压过旧标题、旧表仍能为「无检查点」的行兜底、`/state` 路径脱敏 + diagnostics、`requireOwnerPeer` 四态（非 owner 403 / owner 200 / 无 principal 503 / 默认关不改变行为）。
+
 ## [0.3.21] — 2026-11-09
 
 CI 第一次真正跑起来就抓到一条**只在中文机器上通过**的用例。0.3.20 发布后推送仓库，四个矩阵任务（ubuntu/windows × Node 22.15/24）全部在 `npm test` 阶段失败，失败点相同。

@@ -2084,3 +2084,79 @@ test('trash: stranded memory files offer, and accept, the forced discard', async
     await fixture.home.cleanup()
   }
 })
+
+test('state: adapter diagnostics are redacted before they cross HTTP', async () => {
+  // `/state` is a SUCCESS response, so it never went through `redactDetails`.
+  // An unreadable memory index surfaces the raw ENOENT message, which carries
+  // an absolute path — and `/state` is the one route that can be read without a
+  // connection fence, so that path was reachable unauthenticated.
+  const fixture = await makeFixture({
+    configOverrides: {
+      memory: {
+        enabled: true,
+        adapters: ['generic-json'],
+        generic: { indexFile: 'C:\\Users\\someone\\.dsh\\storages\\nodes.json', rootDir: 'C:\\Users\\someone\\.dsh\\storages' },
+      },
+    },
+  })
+  try {
+    const result = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(result.status, 200)
+    const state = result.body.state ?? {}
+    const reason = String(state.memory?.adapters?.[0]?.reason ?? '')
+    // The username segment only survives if the raw ENOENT message reached the
+    // wire; redaction keeps the basename (`nodes.json`) and drops the rest.
+    assert.ok(!reason.includes('someone'), `adapter reason not redacted: ${reason}`)
+    assert.equal(typeof state.diagnostics, 'object', `state keys: ${Object.keys(state).join(',')}`)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('security: requireOwnerPeer refuses a non-owner peer', async () => {
+  const nonOwner = { requestRejection: () => undefined, admit: () => ({ principal: { kind: 'guest' } }) }
+  const fixture = await makeFixture({ connection: nonOwner, configOverrides: { requireOwnerPeer: true } })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(preview.status, 403)
+    assert.equal(preview.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('security: requireOwnerPeer admits the owner', async () => {
+  const owner = { requestRejection: () => undefined, admit: async () => ({ principal: { kind: 'owner' } }) }
+  const fixture = await makeFixture({ connection: owner, configOverrides: { requireOwnerPeer: true } })
+  try {
+    const result = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(result.status, 200)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('security: requireOwnerPeer fails closed when the principal is unknown', async () => {
+  // A connection layer that cannot report a principal must refuse: "I cannot
+  // tell who you are" is not permission to delete.
+  const opaque = { requestRejection: () => undefined }
+  const fixture = await makeFixture({ connection: opaque, configOverrides: { requireOwnerPeer: true } })
+  try {
+    const result = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(result.status, 503)
+    assert.equal(result.body.error.code, 'E_PEER_UNKNOWN')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('security: requireOwnerPeer stays out of the way when it is off (default)', async () => {
+  const nonOwner = { requestRejection: () => undefined, admit: () => ({ principal: { kind: 'guest' } }) }
+  const fixture = await makeFixture({ connection: nonOwner })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(preview.status, 200, 'default behaviour must not change')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
