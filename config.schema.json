@@ -75,6 +75,15 @@
         "batchDoubleConfirm": { "type": "boolean", "default": true }
       }
     },
+    "autoArchive": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Archive → recycle bin. An archived conversation automatically becomes a recycle-bin entry, and the retention sweep purges it after trashRetentionDays. Those entries never move conversation memory. The switch is genuinely three-state at runtime: this config is the operator veto and the pre-selected answer, while the user's own answer lives in <dataDir>/auto-archive.json, so Settings can toggle it without editing this file. Effective behaviour = enabled AND the user answered 'on': an unanswered prompt never starts a countdown.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true, "description": "Master switch for the automatic path, and the default answer pre-selected in the one-time prompt. false removes the feature (and the prompt) for this deployment regardless of any stored answer." },
+        "askOnUpgrade": { "type": "boolean", "default": true, "description": "Show the one-time 'should archived conversations be moved to the recycle bin?' prompt in Settings after the upgrade. false never asks." }
+      }
+    },
     "feedback": {
       "type": "object",
       "additionalProperties": false,

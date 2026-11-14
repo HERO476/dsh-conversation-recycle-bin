@@ -105,7 +105,7 @@ memory  →  messages  →  session/catalog
    - 队列与锁都有预算，不会无限等待：排队超过 `lockTimeoutMs + 60s` 抛 `E_QUEUE_TIMEOUT`（503，**未执行任何动作**，可安全重试）；客户端在排队或取锁期间断开（关标签页/刷新）抛 `E_ABANDONED`（409，同样未执行）。两者都表示"什么都没发生"，与 `E_TRANSACTION_FAILED`（可能已部分执行）区分开；
    - 锁文件 stale 判定：pid 可证明已死才立即破锁；无 owner 的锁只按 age 破；**持有者活着时绝不按 age 破**（否则长 GC 会放进第二个写者）。连续 3 次删不掉 stale 锁即 `E_LOCK_BUSY`，不空转；
    - 返回 `{ok: true, partial, results, failures}`：`ok` 表示计划已执行，`partial` 表示有会话失败；只有**全部**失败时才抛首个错误（HTTP 状态来自 `ERROR_STATUS`，错误码保留真实策略码）。
-3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging）；每行带 `capabilities`，其 `canRestore`/`canDiscard` 同时看 manifest 与磁盘载荷）、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志或记忆文件的条目应走「恢复」而不是 discard）。未完成条目若还留着会话日志或记忆包，设置页会按 `capabilities.canRestore` 给出「恢复」按钮，可以直接把它恢复回会话列表；hard 删除在「日志已移入回收站、manifest 尚未记录」的崩溃窗口里，restore 会从日志头部的 `cwd` 重建原路径并把日志移回，不再出现三路全拒的死条目。
+3. `GET /trash`（返回 `entries`（可恢复）与 `incomplete`（failed/pending/restoring/purging）；每行带 `capabilities`，其 `canRestore`/`canDiscard` 同时看 manifest 与磁盘载荷；`origin:"auto-archive"` 的行额外带 `revived`，取消归档后 `daysLeft`/`expiresAt` 为 `null`，不再显示一个不会兑现的倒计时）、`POST /trash/restore`、`POST /trash/purge`（必须输入 `DELETE`）、`POST /trash/discard`（清理未完成条目，必须输入 `DELETE`；仍保存会话日志或记忆文件的条目应走「恢复」而不是 discard）、`POST /archive-auto/ack`（记录「归档是否自动进回收站」的一次性回答，不删除任何东西；`enabled:false` 时它与 `/feedback` 一样仍可达）。未完成条目若还留着会话日志或记忆包，设置页会按 `capabilities.canRestore` 给出「恢复」按钮，可以直接把它恢复回会话列表；hard 删除在「日志已移入回收站、manifest 尚未记录」的崩溃窗口里，restore 会从日志头部的 `cwd` 重建原路径并把日志移回，不再出现三路全拒的死条目。
 4. `GET /audit?limit=N`。
 
 ### 4.2 安全清单
@@ -158,7 +158,7 @@ memory  →  messages  →  session/catalog
 
 ### 4.4 配置项全表
 
-`cordis.patch.yml` 的 `config` 段共 22 个键；全部可省略，省略即取默认值。`normalizeConfig` 从不抛错：越界值被钳制、类型错误回落默认，并把每一条修正写进 `/state` 的 `warnings`（`enabled` 例外，它 fail-closed）。
+`cordis.patch.yml` 的 `config` 段共 23 个键；全部可省略，省略即取默认值。`normalizeConfig` 从不抛错：越界值被钳制、类型错误回落默认，并把每一条修正写进 `/state` 的 `warnings`（`enabled` 例外，它 fail-closed）。
 
 | 键 | 默认 | 说明 |
 |---|---|---|
@@ -184,9 +184,29 @@ memory  →  messages  →  session/catalog
 | `auditMaxBytes` | `5242880`（5 MiB） | 审计文件字节上限，超出后压缩（64KB–1GB）。 |
 | `memory` | `enabled:true`、`adapters:["lingshu","generic-json","none"]`、`deleteMode:"trash"` | 记忆适配器段：`enabled`、`adapters`、`lessons`（灵枢）等。 |
 | `ui` | `showRowAction/showHeaderAction/batchDoubleConfirm` 均 `true` | 前端座位开关与批量二次确认。 |
+| `autoArchive` | `enabled:true`、`askOnUpgrade:true` | 归档 → 回收站。见 §4.5：`enabled` 既是运营方否决位，也是升级提示的预选答案；**是否真正执行取决于用户在设置页的回答**。 |
 | `feedback` | 见 §9.2 | 反馈邮件段（非机密）。 |
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
+
+### 4.5 归档 → 回收站（`autoArchive`）
+
+把一个被**归档**的会话自动登记进回收站，再由上面的保留期清扫在 `trashRetentionDays` 天后彻底删除。**关联记忆永不被这条路径触碰**（入口硬编码 `includeMemory:false`，且 `performPurge` 对该来源的条目有 `E_MEMORY_GUARD` 兜底）。
+
+| 事实 | 说明 |
+|---|---|
+| 触发 | 宿主 `workspaceRegistry` 的 `workspace/session-archived`（持久写之后派发，payload 仅 `{sessionId}`）。这是官方既有范式：`dsh-experimental-worktree` 用同一对事件做「归档→排定清理、取消归档→撤回」。 |
+| 撤回 | `workspace/session-unarchiving`（在移除 id **之前**、被 await 的取消前钩子）。用户取消归档 → 已排定但未执行的登记被取消。 |
+| 监听器必须同步 | 归档事件是在 `archiveSession()` 的 `enqueueOperation` 内部被 await 的；监听器里任何 `await` 的 registry 写（`await performSessionDelete()` 就是，因为 soft 路径会碰 catalog）都会让这个队列等自己 → **registry 永久自锁**。所以监听器只 `schedule()` 并 `return void`，真正的工作在 `setImmediate` 里、走同一个 `serialize()` 跨进程锁。 |
+| 条目来源 | manifest 新增 `origin:"auto-archive"` 与 `archivedAt`。旧 manifest 没有 `origin`，按用户删除处理（兼容）。 |
+| 幂等 | 同一 `sessionId` 在 `pending/trashed/restoring/purging` 中最多一条；判定用既有 `trash.scanAll()`，不新增索引文件。`failed` 不算占用（允许重试），`pending` 复用（允许崩溃后收尾）。 |
+| 归属策略 | 自动路径**同样**逐会话跑 `evaluateSessionPolicy`：`protectedSessionIds`、`allowedWorkspaceRoots`、子代理/孤儿会话一律不登记，并以 `action:"auto-archive-skip"` 写入审计。 |
+| 审计归因 | 自动路径记 `actor:"system:archive-auto"`、`source:"auto-archive"`，并且**不写标题**（`title:null`），与 purge 的既有口径一致。 |
+| 时钟护栏 | 同一进程内两次清扫间隔 > 24h 视为墙钟跳变（NTP 纠偏、快照恢复、手改时间）：本轮只推进高水位、不销毁，下一轮（6h 后）恢复正常。首次启动不设护栏——机器确实没运行，条目确实更旧。 |
+| 恢复语义 | 由归档产生的条目，快照里 `archived:true`；「恢复」对该来源强制**取消归档**，否则会「提示恢复成功、会话仍隐藏」。 |
+| 开关 | 三态 `unasked / on / off`，存 `<dataDir>/auto-archive.json`（不是配置：配置在激活期只读，没有写配置路由）。**`unasked` 永不执行**——「默认开启」表现为升级提示里预选「开启」，而不是替用户启动不可逆计时。关闭只挡**新增**，已在册条目仍按 30 天走完（否则「关开关」= 数据永驻）。 |
+| 提示 | 设置页一次性询问，去重状态在宿主侧（清浏览器缓存不会重复弹、也不能被伪造跳过）。`enabled:false` 时该 ack 路由仍可达（否则问题永远答不了），但它只写状态文件、不删任何东西。 |
+| 何时不可用 | 宿主没有事件总线 / 不发布该事件时：`/state.autoArchive.hookAvailable=false`，设置页明说「无法运行」，不会假装承诺 30 天清理。`npm run check:host-api` 也断言这两个事件仍然存在。 |
 
 ---
 
@@ -231,6 +251,8 @@ dsh-conversation-recycle-bin/
 │  │  ├─ transaction.js         # 逆序回滚原语
 │  │  ├─ cascade.js             # 三阶段级联 + 恢复 + 彻底删除
 │  │  ├─ trash.js               # 回收站 manifest
+│  │  ├─ retention.js           # 保留期谓词（纯函数）
+│  │  ├─ auto-archive.js         # 归档→回收站的三态策略与幂等谓词（纯函数）
 │  │  ├─ audit.js               # JSONL 审计 + 压缩
 │  │  └─ memory/                # 记忆适配器（lingshu / generic-json / none）
 │  └─ host/                     # DSH 服务适配
@@ -240,8 +262,10 @@ dsh-conversation-recycle-bin/
 │     ├─ lifecycle.js           # live 会话停机：cancel + archive + drain
 │     ├─ memory.js               # 适配器装配
 │     ├─ feedback.js             # 反馈校验/渲染/投递（http 或 smtp，凭证只读环境变量）
+│     ├─ auto-archive-store.js   # <dataDir>/auto-archive.json（三态状态，原子写）
+│     ├─ archive-hook.js         # 订阅 workspace/session-archived|unarchiving（同步、不外抛）
 │     └─ api.js                 # 同源 HTTP API、确认 token、限流
-└─ test/                        # 221 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + Client 半渲染冒烟
+└─ test/                        # 258 个用例，覆盖用户要求的 5 类场景 + live 删除 + 记忆锁 + 原地刷新 + 部分失败/跨进程/未完成条目 + 反馈通道 + 归档自动入站 + Client 半渲染冒烟
 ```
 
 ---
@@ -250,9 +274,9 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test                     # 依次跑 test/*.test.mjs（10 个文件、233 个用例）；任一失败仍会跑完全部再汇总
+npm test                     # 依次跑 test/*.test.mjs（11 个文件、258 个用例）；任一失败仍会跑完全部再汇总
 npm run check                # 语法 + manifest
-npm run check:host-api       # 静态契约：本机所装的 dsh 是否仍与插件的用法一致（不需要 Host 在跑，也不需要会话）
+npm run check:host-api       # 静态契约：本机所装的 dsh 是否仍与插件的用法一致（含归档事件是否仍被发布；不需要 Host 在跑，也不需要会话）
 npm run check:host-runtime -- --launch=<桌面端 Host 启动 URL>   # 运行态：插件是否真的挂载并应答
 ```
 

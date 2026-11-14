@@ -3,6 +3,44 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.24] — 2026-11-14
+
+新功能：**归档 → 回收站**。被归档的会话自动登记进回收站，再由既有保留期清扫在 `trashRetentionDays`（默认 30）天后彻底删除，**关联记忆永不被这条路径触碰**。设置页可关闭，默认在升级后一次性询问。
+
+实现前先做了一轮三方评审（架构 / 安全 / 验收），结论里最重的一条直接决定了实现形状：归档事件是在 `workspaceRegistry.archiveSession()` 的 `enqueueOperation` 内部被 `await ctx.parallel(...)` 派发的，所以监听器里**任何** await 的 registry 写都会让该队列等自己 → registry 永久自锁。因此监听器只同步 `schedule()`，真正的工作在 `setImmediate` 里走既有的 `serialize()` 跨进程锁。
+
+### Added
+
+- **`lib/core/auto-archive.js`（纯函数）**：三态策略。`unasked | on | off`，生效值 `config.enabled && autoArchive.enabled && state==='on'`。`unasked` 永不执行——「默认开启」只体现为提示里预选「开启」，不替用户启动不可逆计时。另含幂等判定 `findActiveEntryForSession`（`pending/trashed/restoring/purging` 占用，`failed`/`restored` 不占用）与 `shouldPromptForDecision`（只问一次）。
+- **`lib/host/auto-archive-store.js`**：`<dataDir>/auto-archive.json` 原子写（tmp + rename），损坏/未知 schema 一律回落 `unasked`。配置在激活期只读且没有写配置路由，所以设置页的选择必须有自己的落盘位置。
+- **`lib/host/archive-hook.js`**：订阅 `workspace/session-archived` / `workspace/session-unarchiving`（官方既有范式，`dsh-experimental-worktree` 用同一对）。两个 handler 同步、全包 try/catch——`session-unarchiving` 的 rejection 会让宿主**保留归档态**，即用户再也无法取消归档。
+- **入口约束**：`performSessionDelete` 新增 `origin`。`auto-archive` 来源强制 `mode:'soft'`、`includeMemory:false`，并且**传 `includeMemory:true` 直接抛 `E_MEMORY_GUARD`**（而不是静默忽略），否则"不删记忆"会变成调用方自觉。
+- **`POST /archive-auto/ack`**：记录一次性回答。`enabled:false` 时与 `/feedback` 一样仍可达（否则问题永远答不了），但它只写状态文件。
+- **`/state.autoArchive`**：`configured / state / effective / reason / promptPending / hookAvailable / baseArchivedAt / retentionDays`。`hookAvailable:false` 时设置页明说"当前宿主不提供归档事件"，不假装承诺 30 天清理。
+- **`scripts/verify-host-api.mjs`**：新增两条断言，`dsh-workspace` 必须仍发布这两个事件。`ctx.on` 对未声明事件是**静默接受**的，所以宿主改名不会抛错，只会让功能永不触发而 UI 继续承诺清理。
+
+### Fixed
+
+- **归档来源条目的「恢复」等于没恢复**（`lib/host/catalog.js`）：该类条目的快照是 `archived:true`，`restore` 的两个分支都不走，结果是"恢复成功 + 条目消失 + 会话仍隐藏"。`restore(snapshot, {unarchive})` 现在对该来源强制取消归档。
+- **soft 删除对已归档会话的重复 `archiveSession` 调用**（`lib/host/catalog.js`）：宿主对已归档 id 会提前返回，但**仍然入队**。自动入站路径正是从归档事件里触发的，这个嵌套入队会死锁。现在已归档就跳过（行为与宿主一致：`stopActivity` 本来也不会执行）。
+- **归档条目在保留期内被取消归档后，倒计时撒谎**（`lib/host/api.js`）：清扫会永久 `E_SESSION_ALIVE`，界面却一直显示"还剩 N 天"。`/trash` 现在对自动来源的条目复查一次归档态，取消归档后 `revived:true`、`daysLeft/expiresAt` 为 `null`。
+- **30 天判定完全依赖墙钟**（`lib/host/api.js`）：同进程内两次清扫间隔 > 24h 视为时钟跳变（NTP 纠偏、快照恢复、手改时间），本轮只推进高水位、不销毁，下一轮恢复。首次启动不设护栏——机器确实没运行，条目确实更旧。
+- **自动路径绕过归属策略**（`lib/host/api.js`）：归属只在 HTTP 路由执行，自动路径不经过路由。现在逐会话跑 `evaluateSessionPolicy`，拒绝时写 `auto-archive-skip` 审计。
+- **审计把无人值守行为记成用户操作**：自动路径现在 `actor:"system:archive-auto"`、`source:"auto-archive"`、`title:null`，事后可区分"用户点删除"与"归档自动登记"。
+
+### Changed
+
+- 新增配置段 `autoArchive: { enabled: true, askOnUpgrade: true }`（`config.schema.json` / `config.js` / `cordis.patch.yml` / README §4.4 四处同步；`manifest.test.mjs` 的 schema ⇄ DEFAULTS 断言是闸门）。`enabled` 是运营方否决位，也是提示的预选答案。
+- 回收站 manifest 新增 `origin`（`"user"` / `"auto-archive"`）与 `archivedAt`。旧 manifest 无 `origin`，按用户删除处理。
+- 设置页新增「会话被归档时」卡片：一次性升级询问 + 后续开关 + 当前生效状态；回收站行对自动条目显示「由归档自动登记」「已取消归档——不会自动删除」。
+- 测试：新增 `test/auto-archive.test.mjs`（9 例）与 `api.test.mjs` 的 15 例集成用例；夹具补 `ctx.on` + `registerArchiveHook` 接线（否则写出来的"事件已覆盖"是假通过）。10 个文件 / 233 例 → **11 个文件 / 258 例**，全绿。
+
+### Known limitations
+
+- `trashRetentionDays` 无上限截断：单轮最多清 20 条、间隔 6h，所以积压多时实际销毁是 `30 天 + ⌈n/20⌉×6h`，文案写"约 30 天后"而不是"第 30 天准时消失"。
+- 关闭自动开关只挡**新增**，已在册的自动条目仍按 30 天走完（否则"关开关"= 数据永驻）；设置页会明示这一点。
+- 归档事件在 `engines.dsh` 下限 `0.2.1-rc.2` 是否存在未验证；本机 `0.2.2-rc.3` 已核实，`check:host-api` 会把这条变成上线前的硬断言。
+
 ## [0.3.23] — 2026-11-14
 
 对**桌面端 `@deepseek-ai/dsh-desktop 0.2.2-rc.3`（内含 `dsh-desktop-runtime 0.2.2-rc.3`）+ 插件 `v0.3.22`** 的实测复查之后的修复。结论是「宿主契约没有硬断裂」：全部套件 10/10 通过（`api.test.mjs` 75/75）、语法全绿，`prefix` 路由、`handler(req,res)`、`__ModuleLoader__.load`、`<id>/client.js`、四个 Slot、23 个配置键与 `0.2.2-rc.3` 逐项对得上。本版闭合的是**验证链条**上的四个缺口——它们不会让功能当场坏掉，但会让下一次宿上升级只能靠肉眼判断。

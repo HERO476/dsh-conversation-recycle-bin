@@ -1172,3 +1172,49 @@ test('client module: the background-sweep notice carries how long ago it ran', a
     assert.match(client.__formatAgo(now - 2 * 86_400_000, now), expected.days, `${localeId}: days`)
   }
 })
+
+// The archive → recycle bin card is the one place a destructive behaviour is
+// opted into, so every string it can render must exist in BOTH locales, and the
+// decision must travel to the Host route that stores it (the card keeps no
+// local copy: a cleared browser cache must not change the answer).
+test('client: the archive-to-recycle-bin card is fully localised and posts its decision', async () => {
+  const applyWithLocale = async (localeId) => {
+    const loaded = await loadClient()
+    loaded.exported.apply({
+      slots: {
+        inject(key, callback) { return callback() ?? (() => {}) },
+        register() { return () => {} },
+      },
+      effect(fn) { fn() },
+      get(name) {
+        if (name === 'locale') return { getSnapshot: () => ({ active: localeId }) }
+        return undefined
+      },
+    })
+    return loaded.exported
+  }
+  const keys = [
+    'auto.title', 'auto.on', 'auto.off', 'auto.explain', 'auto.enabledOn', 'auto.enabledOff',
+    'auto.unasked', 'auto.disabledByOperator', 'auto.noHook', 'auto.turnOn', 'auto.turnOff',
+    'auto.promptTitle', 'auto.promptBody', 'auto.promptAccept', 'auto.promptDecline',
+    'auto.savedOn', 'auto.savedOff', 'auto.originAuto', 'auto.revived', 'auto.baseSince',
+  ]
+  for (const localeId of ['en', 'zh-CN']) {
+    const mod = await applyWithLocale(localeId)
+    for (const key of keys) {
+      const text = mod.__t(key)
+      assert.notEqual(text, key, `${localeId} is missing ${key}`)
+      assert.ok(String(text).trim().length > 0, `${localeId} has an empty ${key}`)
+      // A `{days}` placeholder nobody fills renders as a literal brace.
+      if (key === 'auto.explain' || key === 'auto.promptBody') {
+        assert.match(String(text), /\{days\}/, `${localeId}/${key} must interpolate the retention window`)
+      }
+    }
+  }
+
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /api\('\/archive-auto\/ack',\s*\{[^}]*method:\s*'POST'/, 'the decision must be POSTed to the Host')
+  assert.match(source, /body:\s*\{\s*decision\s*\}/, 'the body must carry the decision')
+  assert.match(source, /state\?\.autoArchive/, 'the card must render the Host-reported state')
+  assert.match(source, /autoArchiveCard\(\)/, 'the card must be mounted in the settings section')
+})

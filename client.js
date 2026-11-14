@@ -142,6 +142,27 @@ window.__ModuleLoader__.load({
         'trash.status.purging': 'purging',
         'trash.status.restored': 'restored',
         'trash.status.unreadable': 'unreadable manifest',
+        // Archive → recycle bin.
+        'auto.title': 'When a conversation is archived',
+        'auto.on': 'Move it to the recycle bin automatically',
+        'auto.off': 'Do nothing — archiving only hides it',
+        'auto.explain': 'An archived conversation is moved into this recycle bin, and the Host permanently deletes it {days} days later. Associated memory is never deleted. Archive it is the only trigger: nothing happens while this is off, and un-archiving a row takes it back out of the countdown.',
+        'auto.enabledOn': 'On — archived conversations enter the recycle bin.',
+        'auto.enabledOff': 'Off — archiving only hides the conversation.',
+        'auto.unasked': 'Not decided yet — nothing is moved.',
+        'auto.disabledByOperator': 'Disabled by the plugin configuration (autoArchive.enabled: false).',
+        'auto.noHook': 'This Host does not publish archive events, so the automatic path cannot run here.',
+        'auto.turnOn': 'Turn on',
+        'auto.turnOff': 'Turn off',
+        'auto.promptTitle': 'New: archived conversations can be swept automatically',
+        'auto.promptBody': 'From this version, archiving a conversation can move it into the recycle bin, where the Host permanently deletes it {days} days later. Conversation memory is never deleted. You can change this at any time below.',
+        'auto.promptAccept': 'Yes, use the recycle bin',
+        'auto.promptDecline': 'No, keep archiving as-is',
+        'auto.savedOn': 'Saved: archived conversations now enter the recycle bin.',
+        'auto.savedOff': 'Saved: archiving no longer moves anything.',
+        'auto.originAuto': 'filed by archiving',
+        'auto.revived': 'un-archived — no longer auto-deleted',
+        'auto.baseSince': 'Active since {time}.',
         'batch.title': 'Batch deletion',
         'batch.hint': 'Each conversation is its own transaction; a failure rolls only that conversation back.',
         'batch.selected': '{count} selected',
@@ -214,6 +235,7 @@ window.__ModuleLoader__.load({
         'error.E_DISABLED': 'Conversation deletion is disabled by configuration.',
         'error.E_TRANSACTION_FAILED': 'Deletion failed and was rolled back.',
         'error.E_MEMORY_FAILED': 'The memory store could not be updated; nothing was deleted.',
+        'error.E_MEMORY_GUARD': 'This entry came from archiving but holds conversation memory, so it was not deleted. Restore it and delete the conversation explicitly if you really want that memory gone.',
         'error.E_BAD_RESPONSE': 'The Host returned an unreadable response.',
         'error.E_INTERNAL': 'An unexpected Host error occurred.',
         'error.E_NOT_FOUND': 'The conversation no longer exists.',
@@ -315,6 +337,27 @@ window.__ModuleLoader__.load({
         'trash.status.purging': '清理中断',
         'trash.status.restored': '已恢复',
         'trash.status.unreadable': '清单不可读',
+        // 归档 → 回收站
+        'auto.title': '会话被归档时',
+        'auto.on': '自动放入回收站',
+        'auto.off': '什么也不做——归档只是把它收起来',
+        'auto.explain': '被归档的会话会自动进入回收站，{days} 天后由宿主彻底删除；关联记忆不会被删除。只有“归档”会触发：关闭后完全不动，把条目取消归档也会退出这个倒计时。',
+        'auto.enabledOn': '已开启——归档的会话会进入回收站。',
+        'auto.enabledOff': '已关闭——归档只是收起会话。',
+        'auto.unasked': '尚未选择——目前不会移动任何会话。',
+        'auto.disabledByOperator': '已被插件配置关闭（autoArchive.enabled: false）。',
+        'auto.noHook': '当前宿主没有提供归档事件，自动流程无法在此运行。',
+        'auto.turnOn': '开启',
+        'auto.turnOff': '关闭',
+        'auto.promptTitle': '新功能：归档的会话可被自动清理',
+        'auto.promptBody': '从本版本起，归档一个会话可以选择把它放进回收站，{days} 天后由宿主彻底删除。关联记忆永不会被删除。你可以随时在下方修改。',
+        'auto.promptAccept': '开启，走回收站',
+        'auto.promptDecline': '不开启，保持原样',
+        'auto.savedOn': '已保存：归档的会话现在会进入回收站。',
+        'auto.savedOff': '已保存：归档不再移动任何会话。',
+        'auto.originAuto': '由归档自动登记',
+        'auto.revived': '已取消归档——不会自动删除',
+        'auto.baseSince': '自 {time} 起生效。',
         'batch.title': '批量删除',
         'batch.hint': '每个对话独立事务；失败时仅回滚该对话。',
         'batch.selected': '已选 {count} 个',
@@ -387,6 +430,7 @@ window.__ModuleLoader__.load({
         'error.E_DISABLED': '宿主配置已禁用对话删除。',
         'error.E_TRANSACTION_FAILED': '删除失败，已回滚。',
         'error.E_MEMORY_FAILED': '记忆存储更新失败；未删除任何内容。',
+        'error.E_MEMORY_GUARD': '该条目由归档自动登记，却带有会话记忆，因此没有删除。若确实要清掉这些记忆，请先恢复条目再显式删除该会话。',
         'error.E_BAD_RESPONSE': '宿主返回了无法解析的响应。',
         'error.E_INTERNAL': '宿主发生未预期的错误。',
         'error.E_NOT_FOUND': '该对话已不存在。',
@@ -1851,6 +1895,11 @@ window.__ModuleLoader__.load({
       const [restoreBusyId, setRestoreBusyId] = useState(null)
       const [purgeBusy, setPurgeBusy] = useState(false)
       const [discardBusyId, setDiscardBusyId] = useState(null)
+      // Archive → recycle bin. The ANSWER lives on the Host (so a cleared browser
+      // cache neither repeats nor hides the question); these are only the
+      // in-flight flag and the success flash for the two buttons.
+      const [autoBusy, setAutoBusy] = useState(false)
+      const [autoNotice, setAutoNotice] = useState(null)
 
       // Two refreshes can overlap (mount, mutation broadcast, and the refresh a
       // purge triggers), and the older response must not overwrite the newer.
@@ -1927,6 +1976,32 @@ window.__ModuleLoader__.load({
           loadTab(tab, { force: true }),
         ])
       }, [tab, refreshState, loadTab])
+
+      /**
+       * Answer the "should archiving move conversations to the recycle bin?"
+       * question — or flip it later; it is the same route either way.
+       *
+       * The Host persists it (`<dataDir>/auto-archive.json`), because the row
+       * config is read-only at runtime: a Settings-page switch had nowhere to
+       * live. Nothing is deleted by this call.
+       */
+      const decideAuto = useCallback(async (decision) => {
+        setAutoBusy(true)
+        setAutoNotice(null)
+        try {
+          const response = await api('/archive-auto/ack', { method: 'POST', body: { decision } })
+          setState((current) => (current === null ? current : { ...current, autoArchive: response.autoArchive }))
+          setAutoNotice(decision === 'on' ? 'auto.savedOn' : 'auto.savedOff')
+          // The bin's contents change with the switch (entries stop being
+          // created), so drop the cached listing and re-read the visible tab.
+          loadedRef.current.trash = -1
+          void loadTab('trash', { force: true })
+        } catch (caught) {
+          setError(caught)
+        } finally {
+          setAutoBusy(false)
+        }
+      }, [loadTab])
 
       /**
        * Mark a slice stale without fetching it. Recycle-bin actions call
@@ -2086,6 +2161,65 @@ window.__ModuleLoader__.load({
         return ` · ${left === 0 ? t('trash.expiresSoon') : t('trash.expiresIn', { days: left })}`
       }
 
+      /**
+       * The archive → recycle bin card.
+       *
+       * Three states must be visibly different, because they mean very
+       * different things:
+       *   - never asked: NOTHING is moved; the card is the question;
+       *   - answered: the answer, with a switch to change it;
+       *   - unavailable: the operator vetoed it, or the Host publishes no
+       *     archive events (then the promise of a 30-day cleanup is false, so
+       *     the card says so instead of showing a dead toggle).
+       */
+      const autoArchiveCard = () => {
+        const auto = state?.autoArchive ?? null
+        if (auto === null) return null
+        const days = auto.retentionDays ?? retentionDays
+        const available = auto.configured === true && auto.hookAvailable !== false
+        const statusText = auto.configured !== true
+          ? t('auto.disabledByOperator')
+          : auto.hookAvailable !== true
+            ? t('auto.noHook')
+            : auto.effective === 'on'
+              ? t('auto.enabledOn')
+              : auto.state === 'off'
+                ? t('auto.enabledOff')
+                : t('auto.unasked')
+        const toggle = available
+          ? h('div', { className: 'dc-auto-actions' },
+            h(Button, {
+              variant: auto.effective === 'on' ? undefined : 'primary',
+              disabled: autoBusy === true || auto.effective === 'on',
+              onClick: () => { void decideAuto('on') },
+            }, t('auto.turnOn')),
+            h(Button, {
+              disabled: autoBusy === true || auto.effective !== 'on',
+              onClick: () => { void decideAuto('off') },
+            }, t('auto.turnOff')))
+          : null
+        return h('div', { className: 'dc-auto' },
+          h('div', { className: 'dc-auto-head' },
+            h('span', { className: 'dc-auto-title' }, t('auto.title')),
+            h('span', { className: auto.effective === 'on' ? 'dc-ok' : 'dc-off' }, statusText)),
+          auto.promptPending === true && available
+            // The one-time upgrade prompt. Rendered from HOST state, so it
+            // appears exactly once across browsers and cannot be suppressed by
+            // clearing storage.
+            ? h('div', { className: 'dc-auto-prompt' },
+              h('div', { className: 'dc-auto-prompt-title' }, t('auto.promptTitle')),
+              h('p', { className: 'dc-hint' }, t('auto.promptBody', { days })),
+              h('div', { className: 'dc-auto-actions' },
+                h(Button, { variant: 'primary', disabled: autoBusy === true, onClick: () => { void decideAuto('on') } }, t('auto.promptAccept')),
+                h(Button, { disabled: autoBusy === true, onClick: () => { void decideAuto('off') } }, t('auto.promptDecline'))))
+            : h('p', { className: 'dc-hint' }, t('auto.explain', { days })),
+          toggle,
+          typeof auto.baseArchivedAt === 'number'
+            ? h('p', { className: 'dc-hint' }, t('auto.baseSince', { time: formatTime(auto.baseArchivedAt) }))
+            : null,
+          autoNotice !== null ? h('p', { className: 'dc-hint dc-ok' }, t(autoNotice)) : null)
+      }
+
       const openFeedback = () => dialogStore.open({
         kind: 'feedback',
         key: 'feedback',
@@ -2116,6 +2250,8 @@ window.__ModuleLoader__.load({
               h(GlyphRefresh, { size: 13 }), ' ', t('action.refresh')))),
 
         h(ErrorBanner, { error }),
+
+        autoArchiveCard(),
 
         state !== null ? h('div', { className: 'dc-state' },
           h('div', { className: 'dc-state-block' },
@@ -2160,7 +2296,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dc-row-main' },
               h('div', { className: 'dc-row-title' }, entry.title || entry.sessionId),
               h('div', { className: 'dc-hint' },
-                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${expiryHint(entry)}`)),
+                `${t('trash.deletedAt', { time: formatTime(entry.deletedAt) })} · ${entry.mode === 'hard' ? t('trash.modeHard') : t('trash.modeSoft')} · ${t('trash.items', { sessions: 1, memories: entry.memory ?? 0 })}${entry.origin === 'auto-archive' ? ` · ${t('auto.originAuto')}` : ''}${entry.revived === true ? ` · ${t('auto.revived')}` : ''}${expiryHint(entry)}`)),
             h('div', { className: 'dc-row-actions' },
               // The Host already knows whether this entry can be restored;
               // the panel used to offer the button and then show the refusal.
@@ -2282,6 +2418,15 @@ window.__ModuleLoader__.load({
 .dc-dialog-title{margin:0 0 8px;font-size:16px;font-weight:600;line-height:1.4}
 .dc-dialog-body{margin:0 0 12px;font-size:13px;color:var(--dsw-alias-label-secondary,#646a73);line-height:1.6}
 .dc-section{margin-top:10px}
+/* Archive → recycle bin card. Neutral chrome (it is a setting, not a warning);
+   the prompt variant gets the brand border the feedback bar uses so the one-time
+   question is visibly a question rather than another status line. */
+.dc-auto{margin:12px 0 4px;padding:12px 14px;border:1px solid var(--dsw-alias-border-secondary,#e3e5ea);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}
+.dc-auto-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.dc-auto-title{font-weight:600}
+.dc-auto-prompt{margin-top:10px;padding:10px 12px;border:1px solid var(--dsw-alias-brand-primary,#4d6bfe);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#fff)}
+.dc-auto-prompt-title{font-weight:600;margin-bottom:6px}
+.dc-auto-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .dc-meta{font-size:12px;color:var(--dsw-alias-label-secondary,#646a73);margin-bottom:10px}
 .dc-modes{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
 .dc-mode{display:flex;gap:9px;align-items:flex-start;padding:9px 10px;border:1px solid var(--dsw-alias-border-l1,#e5e6eb);border-radius:9px;cursor:pointer;background:var(--dsw-alias-bg-layer-1,#f7f8fa)}

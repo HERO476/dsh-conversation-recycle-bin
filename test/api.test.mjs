@@ -50,6 +50,10 @@ async function makeFixture({
   connection = null,
   clock = null,
   planBudget = null,
+  // Mirrors what `lib/index.js` passes: true only when the Host actually
+  // publishes the archive events. The default stays false so every existing
+  // test keeps exercising the degraded path.
+  archiveHookAvailable = false,
 } = {}) {
   const home = await makeTempHome()
   const workspaceRegistry = makeWorkspaceRegistry([
@@ -146,16 +150,24 @@ async function makeFixture({
   }).value
   const paths = resolveDataPaths(home.root)
   const logs = []
+  // Everything the plugin logged, including the automatic path's skip reasons: a
+  // silent "nothing happened" is the hardest failure to diagnose from outside.
+  const logLines = []
   const api = createDeleteApi({
     ctx: { get: (name) => services[name], ...ctxExtra },
     config,
     paths,
     ...(clock === null ? {} : { now: clock }),
-    logger: { error: (...args) => logs.push(args.join(' ')), warn() {}, info() {} },
+    logger: {
+      error: (...args) => logs.push(args.join(' ')),
+      warn: (...args) => logLines.push(`WARN ${args.join(' ')}`),
+      info: (...args) => logLines.push(`INFO ${args.join(' ')}`),
+    },
     mutationLock,
     ...(planBudget === null ? {} : { planBudget }),
+    archiveHookAvailable,
   })
-  return { home, api, config, paths, services, workspaceRegistry, seeded, memoryRoot, logs, items }
+  return { home, api, config, paths, services, workspaceRegistry, seeded, memoryRoot, logs, logLines, items }
 }
 
 function call(api, path, { method = 'POST', body = null, headers = {}, abortBody = false } = {}) {
@@ -685,7 +697,7 @@ test('hard delete: a catalog step refused halfway puts the archive flag back', a
       JSON.stringify({ global: { archivedSessionIds: [S1], pinnedSessionIds: [] } }),
       'utf8',
     )
-    await fixture.workspaceRegistry.archiveSession(S1)
+    await markArchived(fixture, S1)
     fixture.workspaceRegistry.get('ws-1').detachSession = async () => { throw new Error('writer busy') }
 
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'hard' } })
@@ -2215,6 +2227,535 @@ test('security: requireOwnerPeer stays out of the way when it is off (default)',
   try {
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
     assert.equal(preview.status, 200, 'default behaviour must not change')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+/* ================================================================== *
+ * Archive → recycle bin
+ *
+ * The listeners are dispatched by the Host from INSIDE its own archive
+ * operation, so the fixture has to model that: `makeArchiveBus()` is the same
+ * `ctx.on` surface `lib/index.js` uses, and `fire()` plays the publisher.
+ * ================================================================== */
+
+function makeArchiveBus() {
+  const listeners = { archived: new Set(), unarchiving: new Set() }
+  const setFor = (event) => (event === 'workspace/session-archived'
+    ? listeners.archived
+    : event === 'workspace/session-unarchiving'
+      ? listeners.unarchiving
+      : null)
+  return {
+    listeners,
+    ctxExtra: {
+      on: (event, listener) => {
+        const set = setFor(event)
+        if (set === null) return () => {}
+        set.add(listener)
+        return () => set.delete(listener)
+      },
+    },
+    fire(name, sessionId) {
+      const set = name === 'archived' ? listeners.archived : listeners.unarchiving
+      for (const listener of set) listener({ sessionId })
+    },
+  }
+}
+
+/**
+ * Let the `setImmediate`-scheduled automatic pass run to completion.
+ *
+ * Real time, not microtasks: that pass takes the cross-process file lock and
+ * writes a manifest, so it needs actual I/O ticks (a bare `setImmediate` loop
+ * only drains microtasks and asserted against a half-finished chain).
+ */
+async function flushScheduled(rounds = 60) {
+  for (let index = 0; index < rounds; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+/**
+ * Keep the fixture's two views of "archived" in sync, like the real Host.
+ *
+ * The gateway decides from `storages/workspace.json` (cached for 1.5 s) while the
+ * catalog mutates the in-memory registry object; on a real Host both are the same
+ * fact. Patching the fake's two mutators means every later call — including the
+ * plugin's own `unarchiveSession` during a restore — updates both, so a test can
+ * assert on either without inventing a fake-only rule.
+ */
+function syncLedger(fixture) {
+  const registry = fixture.workspaceRegistry
+  if (registry.__ledgerSynced === true) return
+  const writeArchived = async (sessionId, archived) => {
+    const file = fixture.paths.workspaceFile
+    let document = {}
+    try {
+      document = JSON.parse(await readFile(file, 'utf8'))
+    } catch {
+      // first write
+    }
+    document.global = document.global ?? {}
+    const current = Array.isArray(document.global.archivedSessionIds) ? document.global.archivedSessionIds : []
+    document.global.archivedSessionIds = archived
+      ? [...new Set([...current, sessionId])]
+      : current.filter((id) => id !== sessionId)
+    await writeFile(file, JSON.stringify(document), 'utf8')
+    fixture.api.handler_services.gateway.invalidate()
+  }
+  const archive = registry.archiveSession.bind(registry)
+  const unarchive = registry.unarchiveSession.bind(registry)
+  registry.archiveSession = async (sessionId, options) => {
+    const result = await archive(sessionId, options)
+    await writeArchived(sessionId, true)
+    return result
+  }
+  registry.unarchiveSession = async (sessionId) => {
+    const result = await unarchive(sessionId)
+    await writeArchived(sessionId, false)
+    return result
+  }
+  registry.__ledgerSynced = true
+}
+
+async function markArchived(fixture, sessionId) {
+  syncLedger(fixture)
+  await fixture.workspaceRegistry.archiveSession(sessionId)
+}
+
+async function markUnarchived(fixture, sessionId) {
+  syncLedger(fixture)
+  await fixture.workspaceRegistry.unarchiveSession(sessionId)
+}
+
+async function makeAutoFixture(options = {}) {
+  const bus = makeArchiveBus()
+  const fixture = await makeFixture({
+    ...options,
+    ctxExtra: { ...(options.ctxExtra ?? {}), ...bus.ctxExtra },
+    archiveHookAvailable: true,
+  })
+  // The subscription itself lives in `lib/index.js#apply`, so the fixture wires
+  // it exactly the same way — through `registerArchiveHook` — instead of calling
+  // the api's entry points directly. A test that skipped this would prove the
+  // delete works while the wiring that triggers it was never exercised.
+  const { registerArchiveHook } = await import('../lib/host/archive-hook.js')
+  const hook = registerArchiveHook({
+    ctx: { on: bus.ctxExtra.on },
+    onArchived: (sessionId) => fixture.api.autoTrashOnArchive(sessionId),
+    onUnarchiving: (sessionId) => fixture.api.cancelAutoArchive(sessionId),
+    logger: { warn: (...args) => fixture.logLines.push(`HOOK ${args.join(' ')}`), error() {} },
+  })
+  assert.equal(hook.available, true, 'the fixture must expose the event bus')
+  return { ...fixture, bus, hook }
+}
+
+test('auto: an unanswered prompt reports off everywhere and moves nothing', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.status, 200)
+    const auto = state.body.state.autoArchive
+    assert.equal(auto.state, 'unasked')
+    assert.equal(auto.effective, 'off')
+    assert.equal(auto.reason, 'unasked')
+    assert.equal(auto.promptPending, true)
+    assert.equal(auto.hookAvailable, true)
+    assert.equal(auto.configured, true)
+    assert.equal(auto.retentionDays, 30)
+
+    // The Host archives S1 and publishes the event. Nothing may be filed.
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: the one-time answer is stored by the Host and ends the prompt', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    const ack = await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    assert.equal(ack.status, 200)
+    assert.equal(ack.body.autoArchive.state, 'on')
+    assert.equal(ack.body.autoArchive.effective, 'on')
+    assert.equal(ack.body.autoArchive.promptPending, false)
+    assert.equal(typeof ack.body.autoArchive.decidedAt, 'number')
+
+    // Durable: a second read (another browser, another Host) sees the answer.
+    const stored = JSON.parse(await readFile(join(fixture.paths.dataDir, 'auto-archive.json'), 'utf8'))
+    assert.equal(stored.state, 'on')
+    assert.equal(stored.ackedVersion, JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version)
+
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.body.state.autoArchive.effective, 'on')
+    assert.equal(state.body.state.autoArchive.promptPending, false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: the answer is reachable while deletion is disabled, and deletes nothing', async () => {
+  // With `enabled: false` every POST answers 503 except `/feedback`; the prompt
+  // could otherwise never be answered. The ack route only writes the state file.
+  const fixture = await makeAutoFixture({ configOverrides: { enabled: false } })
+  try {
+    const blocked = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(blocked.status, 503)
+    const ack = await call(fixture.api, '/archive-auto/ack', { body: { decision: 'off' } })
+    assert.equal(ack.status, 200)
+    assert.equal(ack.body.autoArchive.state, 'off')
+    // Still disabled afterwards: answering the question is not a way in.
+    const stillBlocked = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(stillBlocked.status, 503)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: an operator veto wins over a stored "on"', async () => {
+  const fixture = await makeAutoFixture({ configOverrides: { autoArchive: { enabled: false } } })
+  try {
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.body.state.autoArchive.configured, false)
+    assert.equal(state.body.state.autoArchive.effective, 'off')
+    assert.equal(state.body.state.autoArchive.reason, 'config-disabled')
+    // No prompt either: asking a question whose answer cannot take effect is
+    // exactly the kind of noise that trains people to dismiss dialogs.
+    assert.equal(state.body.state.autoArchive.promptPending, false)
+    // And the route refuses, so a hand-written POST cannot arm it.
+    const ack = await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    assert.equal(ack.status, 503)
+    assert.equal(ack.body.error.code, 'E_DISABLED')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: archiving files exactly one entry, with no memory and soft mode', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    // S1 has 2 memory entries in the fixture: the automatic entry must not
+    // touch them (product rule: deleting these conversations never deletes
+    // memory).
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 1, `one archive must produce one entry; logs=${fixture.logLines.join(' | ')}`)
+    const entry = trash.body.entries[0]
+    assert.equal(entry.sessionId, S1)
+    assert.equal(entry.origin, 'auto-archive')
+    assert.equal(entry.mode, 'soft')
+    assert.equal(entry.includeMemory, false)
+    assert.equal(entry.memory, 0)
+    assert.equal(entry.daysLeft, 30)
+    assert.equal(typeof entry.expiresAt, 'number')
+
+    // Memory is untouched on disk.
+    const indexFile = join(fixture.home.root, '.dsh-memory', 'data', 'mdcg', '_index.json')
+    const nodes = JSON.parse(await readFile(indexFile, 'utf8')).nodes
+    assert.equal(Object.values(nodes).filter((node) => node.session === S1).length, 2)
+
+    // The audit record is attributed to the autonomous path, and drops the title.
+    const audit = await call(fixture.api, '/audit?limit=20', { method: 'GET' })
+    const record = audit.body.records.find((item) => item.action === 'delete' && item.sessionId === S1)
+    assert.equal(record.actor, 'system:archive-auto')
+    assert.equal(record.source, 'auto-archive')
+    assert.equal(record.title, null)
+    assert.equal(record.origin, 'auto-archive')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: at-least-once delivery never files a second entry', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    // The Host may dispatch the event more than once (retry, a replayed
+    // operation, two Hosts sharing one DSH_HOME). All of them must collapse.
+    fixture.bus.fire('archived', S1)
+    fixture.bus.fire('archived', S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: the archive listener returns synchronously (the registry-queue deadlock guard)', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    // The Host awaits its listeners from INSIDE `archiveSession`'s operation.
+    // If a listener awaited the deletion (which touches the catalog), that
+    // operation would be waiting for work queued behind itself: a permanent
+    // registry deadlock. Model it exactly.
+    let settled = false
+    const operation = (async () => {
+      const results = []
+      for (const listener of fixture.bus.listeners.archived) results.push(listener({ sessionId: S1 }))
+      return Promise.all(results)
+    })().then(() => { settled = true })
+
+    await operation
+    assert.equal(settled, true, 'the archive operation must finish without waiting for the entry')
+    // The entry is filed on a later tick, not inside the Host's operation.
+    const before = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(before.body.entries.length, 0)
+    await flushScheduled()
+    const after = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(after.body.entries.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: un-archiving before the entry exists cancels it', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    // The user brings it back in the same tick: nothing may be filed.
+    await markUnarchived(fixture, S1)
+    fixture.bus.fire('unarchiving', S1)
+    await flushScheduled()
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: un-archiving an entry that already exists stops the countdown without deleting it', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+
+    // Now the user unarchives it. The entry stays (it is the audit trail of what
+    // happened) but the sweep refuses to purge it, so the row must stop
+    // advertising a deadline it will not keep.
+    await markUnarchived(fixture, S1)
+    fixture.bus.fire('unarchiving', S1)
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 1)
+    assert.equal(trash.body.entries[0].revived, true)
+    assert.equal(trash.body.entries[0].daysLeft, null)
+    assert.equal(trash.body.entries[0].expiresAt, null)
+
+    // And the sweep leaves it alone, for the same reason it always did.
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(swept.purged.length, 0)
+    const stillThere = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(stillThere.body.entries.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: restoring an archive-filed entry really brings the conversation back', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    const trashId = trash.body.entries[0].trashId
+
+    // The entry's snapshot says `archived: true` (that is how the conversation
+    // was filed). Replaying it verbatim used to report success while the row
+    // stayed hidden, which the user reads as data loss.
+    const restored = await call(fixture.api, '/trash/restore', { body: { trashId } })
+    assert.equal(restored.status, 200)
+    assert.equal(fixture.workspaceRegistry.archivedSessionIds.includes(S1), false)
+    const after = await call(fixture.api, '/sessions', { method: 'GET' })
+    assert.equal(after.body.sessions.find((session) => session.id === S1).archived, false)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: a protected conversation is refused and the refusal is audited', async () => {
+  const fixture = await makeAutoFixture({ configOverrides: { protectedSessionIds: [S1] } })
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 0)
+    const audit = await call(fixture.api, '/audit?limit=20', { method: 'GET' })
+    const skip = audit.body.records.find((item) => item.action === 'auto-archive-skip')
+    assert.equal(skip.code, 'E_POLICY_PROTECTED')
+    assert.equal(skip.actor, 'system:archive-auto')
+    assert.equal(skip.title, null)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: an entry holding memory is never purged (E_MEMORY_GUARD)', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    const trashId = trash.body.entries[0].trashId
+
+    // Simulate the one thing that must never happen: an automatic entry that
+    // carries memory (a hand-edited manifest, or a caller that bypassed the
+    // origin guard). Purging would delete the directory and the only copy with it.
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.includeMemory = true
+    manifest.memory = { adapters: [{ id: 'lingshu', count: 2 }], total: 2, protected: 0, skipped: [] }
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+
+    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE' } })
+    assert.equal(purged.status, 409)
+    assert.equal(purged.body.error.code, 'E_MEMORY_GUARD')
+    // Nothing was removed.
+    assert.equal(await pathExists(manifestPath), true)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: the cascade refuses to create an automatic entry with memory', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    const session = await fixture.api.handler_services.gateway.inspect(S1)
+    // The automatic path itself always passes `includeMemory: false`. A caller
+    // that tries otherwise is a bug, and an exception is the only honest answer:
+    // silently ignoring the flag would let a mis-wired call site look correct
+    // while changing what "never deletes memory" means.
+    const { performSessionDelete } = await import('../lib/core/cascade.js')
+    await assert.rejects(
+      () => performSessionDelete({
+        session,
+        mode: 'soft',
+        includeMemory: true,
+        ops: {
+          memory: { exportForSession: async () => ({ total: 0, adapters: [], protected: 0, skipped: [] }), restoreEntry: async () => {} },
+          sessionLog: { moveToTrash: async () => null, restoreEntry: async () => {} },
+          catalog: { capture: async () => ({}), remove: async () => async () => {}, restore: async () => async () => {} },
+        },
+        trash: fixture.api.handler_services.trash,
+        audit: { append: async () => {} },
+        config: fixture.config,
+        origin: 'auto-archive',
+      }),
+      (error) => error.code === 'E_MEMORY_GUARD',
+    )
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: turning the switch off stops new entries but keeps the existing ones', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled()
+    const first = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(first.body.entries.length, 1)
+
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'off' } })
+    // A NEW archive after the switch is off files nothing…
+    await markArchived(fixture, S2)
+    fixture.bus.fire('archived', S2)
+    await flushScheduled()
+    const second = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(second.body.entries.length, 1)
+    assert.equal(second.body.entries[0].sessionId, S1)
+    // …while the entry already in the bin keeps its 30-day promise (a switch
+    // that silently exempted it would make "turn it off" a way to keep data
+    // forever, which is not what the setting says).
+    const manifestPath = join(fixture.paths.trashDir, second.body.entries[0].trashId, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest.deletedAt = Date.now() - 31 * 86_400_000
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
+    const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(swept.purged.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('retention: a forward clock jump only advances the high-water mark', async () => {
+  let fakeNow = Date.UTC(2026, 0, 1, 12, 0, 0)
+  const fixture = await makeFixture({ clock: () => fakeNow, sessionIds: [S1] })
+  const { performSessionDelete } = await import('../lib/core/cascade.js')
+  try {
+    // The sweep only retires a SOFT entry while its session is still archived
+    // (a revived conversation is a human decision, not a race to win).
+    await markArchived(fixture, S1)
+    const session = await fixture.api.handler_services.gateway.inspect(S1)
+    const outcomes = []
+    for (const mode of ['soft']) {
+      outcomes.push(await performSessionDelete({
+        session,
+        mode,
+        includeMemory: false,
+        ops: {
+          memory: { exportForSession: async () => ({ total: 0, adapters: [], protected: 0, skipped: [] }), restoreEntry: async () => {} },
+          sessionLog: { moveToTrash: async () => null, restoreEntry: async () => {} },
+          catalog: { capture: async () => ({ sessionId: S1 }), remove: async () => async () => {} },
+        },
+        trash: fixture.api.handler_services.trash,
+        audit: { append: async () => {} },
+        config: fixture.config,
+        now: () => fakeNow,
+      }))
+    }
+    assert.equal(outcomes.length, 1)
+
+    // A first sweep establishes the process's high-water mark.
+    const first = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(first.purged.length, 0)
+
+    // The wall clock jumps 400 days (NTP correction, restored snapshot, someone
+    // setting it). Every entry now looks expired; destroying them all would be
+    // an irreversible answer to a clock bug.
+    fakeNow += 400 * 86_400_000
+    const jumped = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(jumped.clockJump, true)
+    assert.equal(jumped.purged.length, 0)
+    const after = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(after.body.entries.length, 1, 'the entry must survive the jump')
+
+    // Six hours later the sweep is back to normal and the (now genuinely old)
+    // entry is retired.
+    fakeNow += 6 * 3_600_000
+    const normal = await fixture.api.__test.sweepExpiredTrash({ force: true })
+    assert.equal(normal.clockJump, undefined)
+    assert.equal(normal.purged.length, 1)
   } finally {
     await fixture.home.cleanup()
   }

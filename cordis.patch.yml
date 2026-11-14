@@ -83,6 +83,22 @@
           # Should a checked "delete associated memory" move entries to the
           # plugin trash (recoverable) or leave them untouched?
           deleteMode: trash
+        # Archive → recycle bin. An archived conversation automatically becomes a
+        # recycle-bin entry, which the retention sweep above purges after
+        # `trashRetentionDays` days. Those entries NEVER touch conversation
+        # memory, whatever `memory.deleteMode` says.
+        #
+        # `enabled` is both the operator veto and the pre-selected answer in the
+        # one-time prompt shown after an upgrade: the effective behaviour is
+        # `enabled` AND the user having answered "on" (state lives in
+        # `<dataDir>/auto-archive.json`, so Settings can flip it at runtime
+        # without editing this file). Set false here to remove the feature for
+        # every user of this deployment, prompt included.
+        autoArchive:
+          enabled: true
+          # false = never show the one-time prompt (useful when you deploy for
+          # others and do not want an in-app question).
+          askOnUpgrade: true
         ui:
           showRowAction: true
           showHeaderAction: true

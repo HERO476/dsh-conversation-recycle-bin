@@ -294,6 +294,31 @@ async function main() {
     const declaredId = clientSource.match(/id:\s*'([^']+)'/)?.[1] ?? ''
     record('client bundle registers under the package name', declaredId === plugin.name, `id=${declaredId || 'missing'} name=${plugin.name}`)
 
+    // 6. The archive lifecycle events the "archive → recycle bin" path hangs off.
+    //    `ctx.on` ACCEPTS an event name nobody publishes (Cordis creates the hook
+    //    list on demand), so a rename would not throw: the feature would simply
+    //    never fire while the UI kept promising a 30-day cleanup. Assert the
+    //    publisher, not our own listener.
+    const workspaceRegistry = await host.readFirst([
+      `${PKG('dsh-workspace')}/src/index.ts`,
+      `${PKG('dsh-workspace')}/lib/index.js`,
+    ])
+    if (workspaceRegistry === null) {
+      record('host exposes dsh-workspace (archive events)', false, 'package missing')
+    } else {
+      // Plain substring checks on purpose: the assertion is "this package still
+      // names the events", and a regex here would be one more thing to escape
+      // wrong on the two source layouts the probe has to read.
+      record(
+        'dsh-workspace still publishes workspace/session-archived',
+        workspaceRegistry.includes('workspace/session-archived'),
+      )
+      record(
+        'dsh-workspace still publishes workspace/session-unarchiving',
+        workspaceRegistry.includes('workspace/session-unarchiving'),
+      )
+    }
+
     const failed = results.filter((item) => item.ok !== true)
     if (failed.length > 0) {
       console.log(`\n${failed.length} contract assertion(s) drifted. Re-read the plugin against this host build before releasing.`)
