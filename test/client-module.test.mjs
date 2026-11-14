@@ -797,6 +797,41 @@ test('client: API calls stay document-relative so a path-prefixed deploy keeps i
   }
 })
 
+test('client: the bundle only uses `require` through the factory argument', async () => {
+  // The 2026-11-10 desktop boot log (`dsh-desktop 0.2.2-rc.1`) recorded
+  // `Uncaught ReferenceError: require is not defined` against a combo bundle
+  // that included this client. Nothing in this file was implicated, but the
+  // failure mode is cheap to make impossible: the client half must reach every
+  // dependency through the `factory(require)` argument, never through a global.
+  // A global `require` in the renderer is exactly what the shell does not
+  // provide, and the error surfaces as a blank panel rather than a bad build.
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const factoryAt = source.indexOf('factory:')
+  assert.ok(factoryAt > 0, 'client.js no longer registers through factory(require)')
+
+  const strayCalls = []
+  for (let index = source.indexOf('require('); index !== -1; index = source.indexOf('require(', index + 1)) {
+    if (index < factoryAt) strayCalls.push(source.slice(Math.max(0, index - 60), index + 20))
+  }
+  assert.deepEqual(strayCalls, [], 'a `require(` call sits outside the factory body')
+
+  // Host/Node-only globals have no meaning in either renderer (browser shell or
+  // `dsh-app://app`). Reaching for one would fail only at runtime, in one of
+  // the two carriers, which is the class of bug this guard exists to prevent.
+  for (const forbidden of ['process.env', 'process.platform', 'require("node:', "require('node:"]) {
+    assert.equal(source.includes(forbidden), false, `client.js references ${forbidden}`)
+  }
+})
+
+test('client: the registered module id equals the package name the boot graph keys on', async () => {
+  // The Host keys every client row by `package.json#name`; a bundle that
+  // registers under any other id is reported as "loaded without registering"
+  // and then re-executed from its one-resource URL, which aborts web boot.
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const loaded = await loadClient()
+  assert.equal(loaded.moduleId, pkg.name)
+})
+
 test('client: recycle-bin write budget stays above the Host lock budget', async () => {
   // Whichever side gives up first decides whether the user sees "failed" for
   // work that did actually complete: the Host must be able to answer

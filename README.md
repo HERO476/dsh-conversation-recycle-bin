@@ -250,10 +250,13 @@ dsh-conversation-recycle-bin/
 
 ```powershell
 cd D:\Users\34332\AI\dsh-conversation-recycle-bin
-npm test        # 依次跑 test/*.test.mjs（10 个文件、221 个用例）；任一失败仍会跑完全部再汇总
-npm run check   # 语法 + manifest
-node scripts/verify-host-contract.mjs http://127.0.0.1:3082 --token=<token>   # 宿主已启动时的运行时探针（boot 图 + /api/state）
+npm test                     # 依次跑 test/*.test.mjs（10 个文件、233 个用例）；任一失败仍会跑完全部再汇总
+npm run check                # 语法 + manifest
+npm run check:host-api       # 静态契约：本机所装的 dsh 是否仍与插件的用法一致（不需要 Host 在跑，也不需要会话）
+npm run check:host-runtime -- --launch=<桌面端 Host 启动 URL>   # 运行态：插件是否真的挂载并应答
 ```
+
+`check:host-runtime` 需要一个已启动的 Host 和它的会话凭据。桌面端**不发 token**：它在 Electron 主进程里用启动 URL 换一个 authority 绑定的 cookie，所以桌面载体上要用 `--launch`；`dsh web` 用 `--token`；从浏览器网络面板复制则可直接用 `--cookie="dsh-auth-…=…"` 或 `--cookie-file=<文件>`。四条入口见 `AUDIT-INDEX.md`。
 
 | 用户要求场景 | 用例 |
 |---|---|

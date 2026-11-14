@@ -9,9 +9,23 @@
  * and every route answered 404 with no error anywhere.
  *
  * Usage:
- *   node scripts/verify-host-contract.mjs [baseUrl] [--token=...]
- *   (baseUrl defaults to $DSH_WEB_URL, then http://127.0.0.1:3082;
- *    --token defaults to $DSH_TOKEN)
+ *   node scripts/verify-host-contract.mjs [baseUrl] [auth option]
+ *
+ *   baseUrl defaults to $DSH_WEB_URL, then http://127.0.0.1:3082.
+ *   Auth options, in precedence order:
+ *     --cookie='a=b; c=d'   a ready cookie header (from the browser's network tab)
+ *     --cookie-file=<path>  first usable line of a file, same format
+ *     --launch=<url>        the Host launch URL the desktop shell reports;
+ *                           the 303 it answers with carries the session cookie
+ *                           the shell would otherwise inject itself
+ *     --token=<token>       session token from a `dsh web` URL
+ *   Environment equivalents: $DSH_COOKIE, $DSH_COOKIE_FILE, $DSH_LAUNCH_URL,
+ *   $DSH_TOKEN.
+ *
+ *   The desktop shell does not hand out a token: it exchanges the Host launch
+ *   URL for an authority-bound cookie inside its own process. `--launch` is the
+ *   supported way to prove mount state on that shell instead of skipping the
+ *   only check that matters after an upgrade.
  *
  * Exit code: 0 = plugin mounted and answering, 1 = not mounted, 2 = probe error.
  */
@@ -22,8 +36,14 @@ const args = process.argv.slice(2)
 // default so existing instructions keep working.
 let base = process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3082'
 let token = process.env.DSH_TOKEN ?? ''
+let explicitCookie = process.env.DSH_COOKIE ?? ''
+let cookieFile = process.env.DSH_COOKIE_FILE ?? ''
+let launchUrl = process.env.DSH_LAUNCH_URL ?? ''
 for (const arg of args) {
   if (arg.startsWith('--token=')) token = arg.slice('--token='.length)
+  else if (arg.startsWith('--cookie=')) explicitCookie = arg.slice('--cookie='.length)
+  else if (arg.startsWith('--cookie-file=')) cookieFile = arg.slice('--cookie-file='.length)
+  else if (arg.startsWith('--launch=')) launchUrl = arg.slice('--launch='.length)
   else if (/^https?:\/\//.test(arg)) base = arg
 }
 base = base.replace(/\/+$/, '')
@@ -40,6 +60,61 @@ function cookieHeader() {
   return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ')
 }
 
+/**
+ * Install the session credential before the first request.
+ *
+ * The desktop shell deliberately mints no token: `authenticateWebHost()` in the
+ * shipped `lib/main.js` fetches the Host launch URL, reads the `set-cookie` off
+ * its 303, and injects that cookie into every forwarded request. A probe that
+ * only understands `--token` therefore reports 401 against a perfectly healthy
+ * desktop Host, and the operator (correctly) reads 401 as "auth problem" while
+ * never learning whether the plugin is mounted — the one question this probe
+ * exists to answer.
+ * @returns {Promise<string|null>} reason text when no credential could be installed
+ */
+async function acquireCredentials() {
+  const absorb = (raw) => {
+    for (const segment of String(raw).split(';')) {
+      const index = segment.indexOf('=')
+      if (index > 0) cookies.set(segment.slice(0, index).trim(), segment.slice(index + 1).trim())
+    }
+  }
+  if (explicitCookie !== '') {
+    absorb(explicitCookie)
+    return null
+  }
+  if (cookieFile !== '') {
+    const { readFile } = await import('node:fs/promises')
+    let text
+    try {
+      text = await readFile(cookieFile, 'utf8')
+    } catch (error) {
+      return `--cookie-file ${cookieFile} is unreadable (${error?.code ?? error?.message ?? 'unknown'})`
+    }
+    const line = text.split(/\r?\n/)
+      .map((value) => value.trim())
+      .find((value) => value.includes('=') && !value.startsWith('#'))
+    if (line === undefined) return `--cookie-file ${cookieFile} holds no cookie line`
+    absorb(line)
+    return null
+  }
+  if (launchUrl !== '') {
+    let response
+    try {
+      response = await fetch(launchUrl, { redirect: 'manual' })
+    } catch (error) {
+      return `--launch URL is unreachable: ${error?.message ?? error}`
+    }
+    rememberCookies(response)
+    await response.body?.cancel()
+    if (cookies.size === 0) {
+      return `--launch answered ${response.status} without a set-cookie header (is it the Host launch URL?)`
+    }
+    return null
+  }
+  return null
+}
+
 const results = []
 function record(name, ok, detail) {
   results.push({ name, ok, detail })
@@ -47,16 +122,25 @@ function record(name, ok, detail) {
 }
 
 async function main() {
+  const credentialProblem = await acquireCredentials()
+  if (credentialProblem !== null) {
+    console.log(`FAIL  credentials — ${credentialProblem}`)
+    return 2
+  }
   // 1. The page hands out the session cookie (and embeds the boot graph).
   const pageUrl = `${base}/${token === '' ? '' : `?token=${encodeURIComponent(token)}`}`
-  const page = await fetch(pageUrl, { redirect: 'follow' })
+  const page = await fetch(pageUrl, { redirect: 'follow', headers: cookieHeader() === '' ? {} : { cookie: cookieHeader() } })
   rememberCookies(page)
   const html = await page.text()
   // A 401 is a probe problem, not an unmounted plugin: without a session token
   // every route refuses, and reporting that as "not mounted" would waste the
   // one check that matters after a restart.
   if (page.status === 401) {
-    console.log('FAIL  GET / — 401; pass --token=<token> (or set DSH_TOKEN) and re-run')
+    console.log('FAIL  GET / — 401; this probe has no usable session. Re-run with one of:')
+    console.log('        --launch=<launch URL the desktop shell reports>   (desktop)')
+    console.log('        --cookie="dsh-auth-…=…"                          (browser network tab)')
+    console.log('        --cookie-file=<path>                             (exported cookie line)')
+    console.log('        --token=<token>                                  (`dsh web` URL)')
     return 2
   }
   record('GET /', page.status === 200, `status ${page.status}, ${html.length} bytes`)
@@ -81,7 +165,7 @@ async function main() {
   })
   const body = await state.text()
   if (state.status === 401) {
-    console.log(`FAIL  GET /conversation-recycle-bin/api/state — 401; the probe lost its session (pass --token=<token>)`)
+    console.log(`FAIL  GET /conversation-recycle-bin/api/state — 401; the probe lost its session (re-run with --launch=<url>, --cookie=<header>, --cookie-file=<path> or --token=<token>)`)
     return 2
   }
   let parsed = null

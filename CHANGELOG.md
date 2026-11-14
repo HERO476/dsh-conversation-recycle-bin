@@ -3,6 +3,29 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.23] — 2026-11-14
+
+对**桌面端 `@deepseek-ai/dsh-desktop 0.2.2-rc.3`（内含 `dsh-desktop-runtime 0.2.2-rc.3`）+ 插件 `v0.3.22`** 的实测复查之后的修复。结论是「宿主契约没有硬断裂」：全部套件 10/10 通过（`api.test.mjs` 75/75）、语法全绿，`prefix` 路由、`handler(req,res)`、`__ModuleLoader__.load`、`<id>/client.js`、四个 Slot、23 个配置键与 `0.2.2-rc.3` 逐项对得上。本版闭合的是**验证链条**上的四个缺口——它们不会让功能当场坏掉，但会让下一次宿上升级只能靠肉眼判断。
+
+### Fixed
+
+- **测试夹具把 `req` 当裸 `EventEmitter`，让「读 body 前有 `await`」的路由永久挂起**（`test/helpers.mjs`）：真实 `IncomingMessage` 是 **paused stream**，没人监听时数据留在缓冲里；裸 `EventEmitter` 直接丢弃。于是 `requireOwnerPeer: true` 下的 POST（闸门里 `await connection.admit(req)` 先于读 body）在夹具里死等 `end`，而真实 Host 完全正常——这条差异会让**任何**给路由前置一个 `await` 的改动看起来像死锁。现在已发生的事件会向晚注册的监听器重放，恢复 paused-stream 语义。
+- **`verify-host-contract.mjs` 在桌面载体上恒为 401**（`scripts/verify-host-contract.mjs`）：它只认 `--token`，而桌面壳根本不发 token —— `authenticateWebHost()` 在 Electron 主进程内用启动 URL 换一个 authority 绑定的 cookie 并注入转发请求。结果就是「升级后插件是否真的挂载」这条唯一关键检查，在桌面端从来跑不出结论。现在支持 `--launch=<启动URL>`（取 303 的 `set-cookie`）、`--cookie=…`、`--cookie-file=…`，以及对应的 `DSH_LAUNCH_URL` / `DSH_COOKIE` / `DSH_COOKIE_FILE`；401 时的提示也改成四条可选入口，不再只报「没 token」。
+
+### Added
+
+- **`scripts/verify-host-api.mjs` + `npm run check:host-api`**：不联网、不需要会话的**静态契约快照**。直接读本机所装的宿主（Windows 桌面自动从 `app.asar` 读，其次 `$DSH_HOST_DIR`，再次 profile 的 `node_modules`），断言六件事：`engines.dsh` 是否放行该宿主版本、`webServer` 仍支持 `kind:'prefix'`、`handler` 仍是 `(req,res)`、`__ModuleLoader__.load` 仍在、客户端资源仍是 `<id>/client.js`、四个 Slot 仍由宿主包贡献，以及 `client.js` 的注册 id 是否等于包名（不等会直接中断 web boot）。宿主升级后先跑它，比人肉比对 `AUDIT-*.md` 可靠。
+- **`AUDIT-INDEX.md`**：说明 `AUDIT-*.md` 全是历史快照、不能当检查清单用；给出当前状态的判定顺序（`check` → `test` → `check:host-api` → `check:host-runtime`），并把 9 份快照列成归档表。`r2.log` 里那条既有的 `state: adapter diagnostics …` 失败在本轮重跑已通过，需要这样的索引才不会被误当成未修项。
+- **`npm run check:host-runtime`**：`verify-host-contract.mjs` 的显式入口（此前只能手敲路径）。
+
+### Tests
+
+新增 3 条用例，并把一条既有行为固定下来：
+
+- `api.test.mjs` — `desktop shell: the forwarder header set (no Origin) still reaches the route`：按 `forwardWebRequest()` 的**真实头集合**发请求（`host`/`origin`/`cookie`/`sec-fetch-site` 被删、`Host` 由 target 重设、注入 `dsh-auth-*`），断言三件事同时成立：无 `Origin` 时放行、`requireOwnerPeer` 仍能把非 owner 挡在 403 `E_FORBIDDEN_PRINCIPAL`、缺插件私有头仍是 403。此前只测过「`Origin` 存在且为 `dsh-app://app`」，转发器删头这一路径没有任何覆盖。
+- `client-module.test.mjs` — `the bundle only uses \`require\` through the factory argument`：`dsh-desktop 0.2.2-rc.1` 期间 renderer 报过 `Uncaught ReferenceError: require is not defined`（combo bundle 里含本插件，当时未能归因）。判定不了就让它不可能发生：`require(` 出现在 factory 之外、或出现 `process.env` / `require('node:…')` 即失败，两类载体（浏览器与 `dsh-app://app`）都没有这些全局。
+- `client-module.test.mjs` — `the registered module id equals the package name the boot graph keys on`：id 与包名不一致会被宿主机报成 "loaded without registering" 再二次执行，最终中断整个 web boot。
+
 ## [0.3.22] — 2026-11-12
 
 对**当前最新宿���**（`@deepseek-ai/dsh-desktop-runtime` **0.2.2-rc.1**，桌面端与 `dsh web` 共用）的三方只读评审（架构 / 安全 / 验收）之后的修复。评审结论是「宿主契约没有硬断裂，但有一处安装门禁错误、一处标题优先级倒置、一处脱敏缺口」；本版把这四项 P0 与两项 P1 全部闭合，并给出一条可复核的运行态探针。

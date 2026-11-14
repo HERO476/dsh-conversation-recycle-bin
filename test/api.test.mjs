@@ -2041,6 +2041,65 @@ test('origin fence: loopback spellings, the desktop shell and a missing Host', (
   }
 })
 
+// The desktop shell does NOT send the browser's header set: `forwardWebRequest`
+// (app.asar `lib/main.js`) deletes `host`, `origin`, `cookie` and
+// `sec-fetch-site`, re-sets Host from the target URL, and injects the
+// Host-issued `dsh-auth-*` cookie. The Origin fence therefore never sees an
+// Origin on that route — which is exactly why the two guards below must stay
+// independent of it. This test pins the forwarder's header set as a fixture so
+// a future change to either side cannot silently widen the route.
+test('desktop shell: the forwarder header set (no Origin) still reaches the route', async () => {
+  const pool = { owner: { kind: 'owner' } }
+  const connection = {
+    requestRejection: () => undefined,
+    admit: async () => ({ principal: pool.principal }),
+  }
+  const fixture = await makeFixture({ connection, configOverrides: { requireOwnerPeer: true } })
+  try {
+    pool.principal = { kind: 'owner' }
+    const forwarded = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: {
+        // Deleted by the forwarder:
+        origin: undefined,
+        'sec-fetch-site': undefined,
+        // Re-set by `fetch` from the Host URL, then kept:
+        cookie: 'dsh-auth-desktop=token',
+      },
+    })
+    assert.equal(forwarded.status, 200, `unexpected ${forwarded.status}: ${forwarded.raw}`)
+    assert.equal(forwarded.body.ok, true)
+
+    // A missing Origin must not be read as "no principal to check". The
+    // owner-only gate is what keeps a remote-access peer out on a proxied
+    // deployment, and losing it here would be invisible in production.
+    pool.principal = { kind: 'remote-grant' }
+    const foreignPeer = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: { origin: undefined, 'sec-fetch-site': undefined, cookie: 'dsh-auth-desktop=token' },
+    })
+    assert.equal(foreignPeer.status, 403)
+    assert.equal(foreignPeer.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
+
+    // And the plugin's own request header is still required on that route:
+    // dropping Origin must not turn a cross-process request into a pass.
+    pool.principal = { kind: 'owner' }
+    const noPluginHeader = await call(fixture.api, '/preview', {
+      body: { sessionIds: [S1] },
+      headers: {
+        origin: undefined,
+        'sec-fetch-site': undefined,
+        'x-conversation-recycle-bin': undefined,
+        cookie: 'dsh-auth-desktop=token',
+      },
+    })
+    assert.equal(noPluginHeader.status, 403)
+    assert.equal(noPluginHeader.body.error.code, 'E_FORBIDDEN_ORIGIN')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
 // Memory files whose bundle was never written are unrecoverable: the list must
 // say so, and the discard route must accept the forced (phrase-confirmed) exit
 // that the panel then offers.

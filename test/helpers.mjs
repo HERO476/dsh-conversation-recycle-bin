@@ -146,6 +146,28 @@ export function makeHttpPair({ method = 'POST', path = '/', headers = {}, body =
   request.url = path
   request.headers = { host, ...headers }
 
+  // A real `IncomingMessage` is a PAUSED stream: chunks that arrive while
+  // nobody is listening stay buffered until a `data`/`end` listener is added.
+  // A bare EventEmitter drops them instead, which made a body read hang
+  // forever whenever the route awaited anything before reading the body —
+  // `requireOwnerPeer` does exactly that (`await connection.admit()`), so a
+  // POST under owner-only mode looked like a deadlock in the fixture while the
+  // real Host was fine. Replaying recorded events to listeners added later
+  // restores paused-stream semantics without changing the production code.
+  const emitted = []
+  const emitRecorded = request.emit.bind(request)
+  request.emit = (name, ...args) => {
+    emitted.push({ name, args })
+    return emitRecorded(name, ...args)
+  }
+  const onRecorded = request.on.bind(request)
+  request.on = (name, listener) => {
+    for (const event of emitted) {
+      if (event.name === name) listener(...event.args)
+    }
+    return onRecorded(name, listener)
+  }
+
   const response = {
     statusCode: null,
     headers: null,
