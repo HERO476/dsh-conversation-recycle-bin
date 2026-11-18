@@ -96,6 +96,29 @@ jobs:
           fi
           exit "$status"
 
+      # Host-API contract. The suites above run against a fake Host, so they
+      # cannot see a renamed route kind, a dropped Slot, a changed handler
+      # signature or a moved private data layout — the failures that reach a
+      # user as "the delete button vanished". This probe reads the installed Host
+      # package and asserts exactly those shapes.
+      #
+      # A CI runner has no desktop Host installed, so the step passes with an
+      # explicit SKIP line instead of a silent green; wherever DSH_HOST_DIR
+      # points at an installation (developer machine, release job) the same step
+      # is a real gate. It ran nowhere at all before this — the changelog called
+      # it a pre-release hard assertion while nothing executed it.
+      - name: check (host API contract)
+        shell: bash
+        run: |
+          set +e
+          npm run check:host-api -- --allow-missing-host > host-api.log 2>&1
+          status=$?
+          cat host-api.log
+          if [ "$status" -ne 0 ]; then
+            node "$RUNNER_TEMP/annotate.js" host-api.log "host API" "$RUNNER_OS" "$(node --version)"
+          fi
+          exit "$status"
+
       # Every suite; the runner keeps going after a failing file so one red
       # suite never hides the state of the other nine.
       - name: test

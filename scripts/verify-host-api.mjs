@@ -20,6 +20,12 @@
  *           <app.asar>/dsh (Windows desktop), then
  *           $DSH_HOME/profiles/node_modules/@deepseek-ai/dsh.
  *
+ *   --allow-missing-host  exit 0 (with an explicit SKIP line) when no Host
+ *                         installation is present. For CI runners, which never
+ *                         have a desktop Host: a red build there says nothing
+ *                         about drift, and a silent green says nothing at all —
+ *                         so the skip is printed.
+ *
  * Exit code: 0 = every assertion holds, 1 = drift found, 2 = host not found.
  */
 import { readFile } from 'node:fs/promises'
@@ -29,6 +35,7 @@ import { join, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
 const quiet = args.includes('--quiet')
+const allowMissingHost = args.includes('--allow-missing-host')
 const hostArg = args.find((value) => value.startsWith('--host='))?.slice('--host='.length)
   ?? process.env.DSH_HOST_DIR
   ?? ''
@@ -214,6 +221,13 @@ function satisfiesRange(version, range) {
 async function main() {
   const host = await openHost()
   if (host === null) {
+    if (allowMissingHost === true) {
+      // Loud on purpose: a CI run that quietly passes without reading a Host is
+      // worse than no gate, because it looks like coverage.
+      console.log('SKIP  no dsh installation found in this runner; host-API assertions were NOT executed.')
+      console.log('      Run this on a machine with the desktop app (or set DSH_HOST_DIR) before releasing.')
+      return 0
+    }
     console.log('FAIL  host package not found; pass --host=<dir> or set DSH_HOST_DIR')
     return 2
   }
@@ -228,6 +242,16 @@ async function main() {
     const hostPkg = JSON.parse(hostPkgText)
     const hostVersion = String(hostPkg.version ?? '')
     record('host package.json is readable', true, `${hostPkg.name ?? 'unknown'} ${hostVersion}`)
+
+    // `engines.dsh` no longer stops at 0.3.0: a hard upper bound made the Host
+    // REFUSE to load the plugin on an upgrade (a throw, not a warning), which is
+    // worse than a build this release was never run against. The trade is that
+    // the range now covers untested lines, so say so instead of implying
+    // support.
+    const hostLine = hostVersion.split('.').slice(0, 2).join('.')
+    if (hostLine !== '0.2') {
+      console.log(`WARN  host ${hostVersion} is outside the regression-tested 0.2.x line: run the full suites and a real delete on this build before shipping.`)
+    }
 
     // 1. The declared engine must still admit the installed build. A wrong
     //    range is silent: the plugin loads and then fails per-request.
@@ -318,6 +342,40 @@ async function main() {
         workspaceRegistry.includes('workspace/session-unarchiving'),
       )
     }
+
+    // 7. Data-layout golden vectors. The plugin reimplements Host-PRIVATE
+    //    encodings — project directory keys, session path segments, the
+    //    projection checkpoint shape — and none of that is a public API. A
+    //    silent change there restores a conversation into the wrong directory,
+    //    or titles every row blank, with no error anywhere. Assert both sides:
+    //    the Host source still contains the rules, and this plugin still
+    //    produces the documented output for a fixed input set.
+    const format = await host.readFirst([
+      `${PKG('dsh-session-persistence-jsonl')}/src/format.ts`,
+      `${PKG('dsh-session-persistence-jsonl')}/lib/index.js`,
+    ])
+    if (format === null) {
+      record('host exposes dsh-session-persistence-jsonl', false, 'package missing')
+    } else {
+      record('host project keys stay bounded at 251 chars', format.includes('251'))
+      record('host escapes unsafe code units as ~XXXX', /padStart\(4,\s*'0'\)|~[0-9A-F]{4}/.test(format))
+      const projectionCache = await host.readFirst([
+        `${PKG('dsh-session-projection-cache')}/src/index.ts`,
+        `${PKG('dsh-session-projection-cache')}/lib/index.js`,
+      ])
+      record(
+        'host still ships the projection cache the checkpoint shape belongs to',
+        projectionCache !== null,
+        projectionCache === null ? 'dsh-session-projection-cache missing' : undefined,
+      )
+    }
+    const { projectKey, encodeSessionSegment } = await import('../lib/host/paths.js')
+    const keyVector = projectKey('D:\\Work')
+    record('plugin projectKey reproduces the golden vector', keyVector === '--D-Work--', keyVector)
+    record('plugin session segment passes a plain id through', encodeSessionSegment('session-1') === 'session-1')
+    record('plugin session segment escapes a separator', encodeSessionSegment('a/b') === 'a~002Fb', encodeSessionSegment('a/b'))
+    const gatewaySource = await readFile(new URL('../lib/host/gateway.js', import.meta.url), 'utf8')
+    record('plugin projection constant is still 7', /PROJECTION_VERSION\s*=\s*7\b/.test(gatewaySource))
 
     const failed = results.filter((item) => item.ok !== true)
     if (failed.length > 0) {

@@ -1450,7 +1450,7 @@ test('queue: a request whose client is already gone is not applied', async () =>
   }
 })
 
-test('retention: an entry older than trashRetentionDays is purged by the next listing', async () => {
+test('retention: an entry older than trashRetentionDays is purged by a sweep, never by a listing', async () => {
   const fixture = await makeFixture()
   try {
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S2], includeMemory: false, mode: 'hard' } })
@@ -2060,11 +2060,48 @@ test('origin fence: loopback spellings, the desktop shell and a missing Host', (
 // Origin on that route — which is exactly why the two guards below must stay
 // independent of it. This test pins the forwarder's header set as a fixture so
 // a future change to either side cannot silently widen the route.
+test('transport: the handler survives a real http.ServerResponse (status, headers, body)', async () => {
+  // The fixture's `res` is a hand-rolled stub with statusCode/end and nothing
+  // else, so a regression that depends on a real ServerResponse — a header,
+  // `headersSent`, a streamed body — would pass every other test and break in
+  // production. One loopback request through node:http closes that gap.
+  const { createServer } = await import('node:http')
+  const { ROUTE_PREFIX } = await import('../lib/host/api.js')
+  const fixture = await makeFixture({ sessionIds: [S1] })
+  const server = createServer(fixture.api.handler)
+  try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const { port } = server.address()
+    const base = `http://127.0.0.1:${port}${ROUTE_PREFIX}`
+    const headers = { 'x-conversation-recycle-bin': '1' }
+    const state = await fetch(`${base}/state`, { headers })
+    assert.equal(state.status, 200)
+    const stateBody = await state.json()
+    assert.equal(stateBody.ok, true)
+    assert.equal(typeof stateBody.state.version, 'string')
+    assert.match(state.headers.get('content-type') ?? '', /application\/json/)
+    const preview = await fetch(`${base}/preview`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionIds: [S1] }),
+    })
+    assert.equal(preview.status, 200)
+    const previewBody = await preview.json()
+    assert.equal(previewBody.preview.sessions.length, 1)
+    // A missing private header is refused on the real transport too.
+    const noHeader = await fetch(`${base}/state`)
+    assert.equal(noHeader.status, 403)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+    await fixture.home.cleanup()
+  }
+})
+
 test('desktop shell: the forwarder header set (no Origin) still reaches the route', async () => {
   const pool = { owner: { kind: 'owner' } }
   const connection = {
     requestRejection: () => undefined,
-    admit: async () => ({ principal: pool.principal }),
+    admit: async () => ({ peer: { principal: pool.principal } }),
   }
   const fixture = await makeFixture({ connection, configOverrides: { requireOwnerPeer: true } })
   try {
@@ -2184,8 +2221,45 @@ test('state: adapter diagnostics are redacted before they cross HTTP', async () 
   }
 })
 
+test('redact: a network URL survives, a host path still shortens', async () => {
+  const { redactDetails } = await import('../lib/core/redact.js')
+  // The drive-letter rule used to eat the `p:/` inside a scheme, so a
+  // cross-origin rejection reported `details.origin = "httevil.example"` and a
+  // diagnostic link came back as `httpb`. The URL is the one field an operator
+  // can act on, so it must pass through untouched.
+  assert.equal(redactDetails({ origin: 'http://evil.example' }).origin, 'http://evil.example')
+  assert.equal(redactDetails({ message: 'see https://example.com/docs/a/b' }).message, 'see https://example.com/docs/a/b')
+  assert.equal(
+    redactDetails({ message: 'http://127.0.0.1:6108/conversation-recycle-bin/api/state' }).message,
+    'http://127.0.0.1:6108/conversation-recycle-bin/api/state',
+  )
+  // …while every path shape still loses its directories.
+  assert.equal(redactDetails({ path: 'C:\\Users\\a\\.dsh\\index.json' }).path, 'index.json')
+  assert.equal(redactDetails({ message: 'ENOENT C:\\Users\\a\\b.txt' }).message, 'ENOENT b.txt')
+  assert.equal(redactDetails({ message: '//server/share/a/b.txt' }).message, 'b.txt')
+  assert.equal(redactDetails({ message: 'file:///C:/Users/a/secret.txt' }).message, 'file:///secret.txt')
+})
+
+test('preview: a SUCCESS response never carries the workspace path', async () => {
+  const fixture = await makeFixture({ sessionIds: [S1] })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1] } })
+    assert.equal(preview.status, 200)
+    const item = preview.body.preview.sessions[0]
+    // `/preview` is a success response, so it never passes through
+    // `redactDetails`; the absolute `workspace.path` used to ride along with
+    // it and leak the operator's directory layout. The Client groups by id and
+    // title only.
+    assert.ok(item.workspace, 'the workspace must still be described')
+    assert.equal('path' in item.workspace, false, 'workspace.path must not cross the wire')
+    assert.ok(item.workspace.id, 'the Client groups by id')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
 test('security: requireOwnerPeer refuses a non-owner peer', async () => {
-  const nonOwner = { requestRejection: () => undefined, admit: () => ({ principal: { kind: 'guest' } }) }
+  const nonOwner = { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'guest' } } }) }
   const fixture = await makeFixture({ connection: nonOwner, configOverrides: { requireOwnerPeer: true } })
   try {
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
@@ -2197,13 +2271,32 @@ test('security: requireOwnerPeer refuses a non-owner peer', async () => {
 })
 
 test('security: requireOwnerPeer admits the owner', async () => {
-  const owner = { requestRejection: () => undefined, admit: async () => ({ principal: { kind: 'owner' } }) }
+  const owner = { requestRejection: () => undefined, admit: async () => ({ peer: { principal: { kind: 'owner' } } }) }
   const fixture = await makeFixture({ connection: owner, configOverrides: { requireOwnerPeer: true } })
   try {
     const result = await call(fixture.api, '/state', { method: 'GET' })
     assert.equal(result.status, 200)
   } finally {
     await fixture.home.cleanup()
+  }
+})
+
+test('security: both PeerAdmission shapes report the principal (host contract regression)', async () => {
+  // The Host resolves `admit()` to `PeerAdmission = { peer: PeerScope } | { rejection }`
+  // (dsh-client-connection src/rpc.ts, rpc-host.ts:129-137). This plugin used to
+  // read `admission.principal` — one level too high — so the owner-only gate
+  // answered 503 to EVERY request, the owner included, the moment it was turned
+  // on. The flattened shape stays accepted for adapters that hand the scope
+  // through directly.
+  for (const admission of [{ peer: { principal: { kind: 'owner' } } }, { principal: { kind: 'owner' } }]) {
+    const connection = { requestRejection: () => undefined, admit: async () => admission }
+    const fixture = await makeFixture({ connection, configOverrides: { requireOwnerPeer: true } })
+    try {
+      const result = await call(fixture.api, '/state', { method: 'GET' })
+      assert.equal(result.status, 200, `unexpected ${result.status} for ${JSON.stringify(admission)}`)
+    } finally {
+      await fixture.home.cleanup()
+    }
   }
 })
 
@@ -2222,7 +2315,7 @@ test('security: requireOwnerPeer fails closed when the principal is unknown', as
 })
 
 test('security: requireOwnerPeer stays out of the way when it is off (default)', async () => {
-  const nonOwner = { requestRejection: () => undefined, admit: () => ({ principal: { kind: 'guest' } }) }
+  const nonOwner = { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'guest' } } }) }
   const fixture = await makeFixture({ connection: nonOwner })
   try {
     const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
@@ -2271,9 +2364,24 @@ function makeArchiveBus() {
  * writes a manifest, so it needs actual I/O ticks (a bare `setImmediate` loop
  * only drains microtasks and asserted against a half-finished chain).
  */
-async function flushScheduled(rounds = 60) {
-  for (let index = 0; index < rounds; index += 1) {
+async function flushScheduled(predicate = null, { settleMs = 800, timeoutMs = 5000 } = {}) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  // A fixed tick budget was the wrong unit. The scheduled pass takes the
+  // cross-process file lock and writes a manifest, so its wall time depends on
+  // disk I/O, not on how many `setTimeout(5)` slices it got: the suite passed
+  // on an idle machine and failed with `0 !== 1` on a loaded one. Callers that
+  // know what they are waiting for pass a predicate and return as soon as it
+  // holds; the rest settle for a generous quiet window.
+  for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 5))
+    const elapsed = Date.now() - started
+    if (predicate === null) {
+      if (elapsed >= settleMs) return
+    } else if (elapsed >= 40 && (await predicate())) {
+      return
+    }
+    if (Date.now() >= deadline) return
   }
 }
 
@@ -2486,7 +2594,7 @@ test('auto: at-least-once delivery never files a second entry', async () => {
     fixture.bus.fire('archived', S1)
     fixture.bus.fire('archived', S1)
     fixture.bus.fire('archived', S1)
-    await flushScheduled()
+    await flushScheduled(async () => (await call(fixture.api, '/trash', { method: 'GET' })).body.entries.length === 1)
     fixture.bus.fire('archived', S1)
     await flushScheduled()
 
@@ -2524,6 +2632,30 @@ test('auto: the archive listener returns synchronously (the registry-queue deadl
   } finally {
     await fixture.home.cleanup()
   }
+})
+
+test('archive hook: a listener that returns a promise is recorded, not just logged', async () => {
+  const { registerArchiveHook } = await import('../lib/host/archive-hook.js')
+  const listeners = new Map()
+  const ctx = {
+    on: (event, listener) => {
+      listeners.set(event, listener)
+      return () => listeners.delete(event)
+    },
+  }
+  const quiet = { warn() {}, error() {} }
+  // A promise-returning handler IS the registry deadlock: it still runs, so the
+  // mistake is invisible at runtime. It has to be assertable in a gate, not
+  // merely mentioned in a log line.
+  const hook = registerArchiveHook({ ctx, onArchived: async () => {}, onUnarchiving: () => {}, logger: quiet })
+  assert.equal(hook.available, true)
+  listeners.get('workspace/session-archived')({ sessionId: S1 })
+  assert.equal(hook.violations.length, 1)
+  assert.equal(hook.violations[0].event, 'workspace/session-archived')
+  // A synchronous handler keeps the list empty, so the assertion is not vacuous.
+  const clean = registerArchiveHook({ ctx, onArchived: () => {}, onUnarchiving: () => {}, logger: quiet })
+  listeners.get('workspace/session-archived')({ sessionId: S1 })
+  assert.equal(clean.violations.length, 0)
 })
 
 test('auto: un-archiving before the entry exists cancels it', async () => {
@@ -2676,13 +2808,32 @@ test('auto: the cascade refuses to create an automatic entry with memory', async
   }
 })
 
-test('auto: turning the switch off stops new entries but keeps the existing ones', async () => {
+test('auto: automatic filing does not spend the user delete budget', async () => {
+  const fixture = await makeAutoFixture({ configOverrides: { maxDeletesPerMinute: 1 } })
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled(async () => (await call(fixture.api, '/trash', { method: 'GET' })).body.entries.length === 1)
+    // With the shared limiter one automatic entry spent the whole per-minute
+    // budget, so the human's next deletion answered 429 for a deletion they
+    // never asked for. Automatic filing is bounded by the archive event rate
+    // and audited under `source: auto-archive`, so it must not touch the
+    // interactive budget.
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.body.state.limits.rate.used, 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: turning the switch off stops new entries and retention never purges the old ones', async () => {
   const fixture = await makeAutoFixture()
   try {
     await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
     await markArchived(fixture, S1)
     fixture.bus.fire('archived', S1)
-    await flushScheduled()
+    await flushScheduled(async () => (await call(fixture.api, '/trash', { method: 'GET' })).body.entries.length === 1)
     const first = await call(fixture.api, '/trash', { method: 'GET' })
     assert.equal(first.body.entries.length, 1)
 
@@ -2694,15 +2845,26 @@ test('auto: turning the switch off stops new entries but keeps the existing ones
     const second = await call(fixture.api, '/trash', { method: 'GET' })
     assert.equal(second.body.entries.length, 1)
     assert.equal(second.body.entries[0].sessionId, S1)
-    // …while the entry already in the bin keeps its 30-day promise (a switch
-    // that silently exempted it would make "turn it off" a way to keep data
-    // forever, which is not what the setting says).
-    const manifestPath = join(fixture.paths.trashDir, second.body.entries[0].trashId, 'manifest.json')
+    // …and the entry already in the bin is NOT purgeable by the janitor. The
+    // Host's archive contract is "hide the conversation, keep the log", so an
+    // automatic entry may only leave the bin when the USER purges it by hand.
+    // An unattended 30-day delete here turned a reversible sidebar action into
+    // permanent data loss — and on this deployment the archived set is not
+    // small.
+    const trashId = second.body.entries[0].trashId
+    const manifestPath = join(fixture.paths.trashDir, trashId, 'manifest.json')
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
     manifest.deletedAt = Date.now() - 31 * 86_400_000
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
     const swept = await fixture.api.__test.sweepExpiredTrash({ force: true })
-    assert.equal(swept.purged.length, 1)
+    assert.equal(swept.purged.length, 0)
+    assert.deepEqual(swept.deferred, [trashId])
+    const still = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(still.body.entries.length, 1)
+    // The user's own purge is the only exit for an automatic entry, and it must
+    // still work.
+    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE' } })
+    assert.equal(purged.status, 200)
   } finally {
     await fixture.home.cleanup()
   }

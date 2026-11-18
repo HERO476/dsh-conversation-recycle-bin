@@ -121,6 +121,33 @@ function record(name, ok, detail) {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`)
 }
 
+/**
+ * Tell "this probe has no session" apart from "the plugin is not mounted".
+ *
+ * The Host answers an unauthenticated request with plain text; this plugin's
+ * own route answers with its typed envelope
+ * `{"ok":false,"error":{"code":"E_UNAUTHORIZED",…}}`. The connection fence
+ * rejects the request before the route body runs, but that envelope can only
+ * come from a mounted prefix — a 404 would be an empty body. Without this the
+ * probe exited 2 on every default install, so the one check that matters after
+ * an upgrade was never actually run.
+ */
+async function probeMountEnvelope() {
+  try {
+    const response = await fetch(`${base}/conversation-recycle-bin/api/state`, {
+      headers: cookieHeader() === '' ? {} : { cookie: cookieHeader() },
+    })
+    const type = (response.headers.get('content-type') ?? '').toLowerCase()
+    const text = await response.text()
+    if (!type.includes('json')) return null
+    const parsed = JSON.parse(text)
+    if (parsed?.ok === false && typeof parsed?.error?.code === 'string') return parsed.error.code
+    return null
+  } catch {
+    return null
+  }
+}
+
 async function main() {
   const credentialProblem = await acquireCredentials()
   if (credentialProblem !== null) {
@@ -136,6 +163,21 @@ async function main() {
   // every route refuses, and reporting that as "not mounted" would waste the
   // one check that matters after a restart.
   if (page.status === 401) {
+    // Mount state is provable without a credential (see probeMountEnvelope).
+    // Only fall through to "probe error" when the route answers like the Host
+    // itself does.
+    const envelopeCode = await probeMountEnvelope()
+    if (envelopeCode !== null) {
+      record(
+        'plugin prefix is mounted (own error envelope)',
+        true,
+        `401 ${envelopeCode} — the connection fence rejected the probe, the plugin route answered`,
+      )
+      console.log('\nResult: MOUNTED. No session was available, but a 404 (unmounted) cannot')
+      console.log('produce this plugin\'s own error envelope. Re-run with --launch/--cookie/--token')
+      console.log('to also exercise the authenticated checks.')
+      return 0
+    }
     console.log('FAIL  GET / — 401; this probe has no usable session. Re-run with one of:')
     console.log('        --launch=<launch URL the desktop shell reports>   (desktop)')
     console.log('        --cookie="dsh-auth-…=…"                          (browser network tab)')

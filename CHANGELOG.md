@@ -3,6 +3,44 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.25] — 2026-11-18
+
+一轮三方评审（架构 / AppSec / 验收）对 v0.3.24 @ DSH 0.2.2-rc.3 的完整复盘的落地。评审确认了点：宿主没换（`0.2.2-rc.3` 三处一致），真正的增量在插件侧；插件在 6108 上真实挂载（`GET /state` 返回**插件自己的** JSON 信封，而宿主的 401 是纯文本）。
+
+最重的两条：`requireOwnerPeer` 在真实宿主上**恒 503**（连 owner 也被拒），而它自己的用例用了宿主根本不返回的 `PeerAdmission` 形状，所以这条缺陷永远绿灯；以及「归档自动入站」把宿主「隐藏但保留日志」的归档语义接到了「30 天后无人值守永久删除」上。
+
+### Fixed
+
+- **`requireOwnerPeer` 恒拒所有人（blocker，限对外/反代部署）**：`ownerPeerVerdict` 读的是 `admission.principal`，而宿主的 `PeerAdmission` 是 `{ peer: PeerScope } | { rejection }`，principal 在下一层。现在按 `peer.peer.principal ?? peer.principal ?? peer` 解包，两种形状都接受；`test/api.test.mjs` 的四处夹具同步换成真形状，并新增「双形状都得 200」的回归用例——原来那条是用错误契约证明功能可用。
+- **归档自动入站的条目不再被保留期清理**：`sweepExpiredTrash()` 对 `origin:"auto-archive"` 的条目一律 `deferred`（返回里可见，不静默跳过），只能由用户在回收站显式彻底删除。宿主的归档语义是可逆的整理动作，本机归档集合实测可达三四百条量级，「30 天后真删」等于把整理变成数据丢失。用户自己删的条目不受影响。
+- **脱敏器把 URL 打碎**：`/(?:[A-Za-z]:[\\/]|\\\\)…/` 把 `http://` 里的 `p:/` 当成盘符，`details.origin` 实际返回 `httevil.example`、诊断链接变 `httpb`。现在网络 scheme（http/https/ws/wss/ftp）先做占位保护再跑路径规则；`file:///C:/…` 仍按路径脱敏。顺带补了正斜杠 UNC（`//server/share/…`）与盘符负向后行断言。
+- **`apply` 不再因为重复注册而丢后续 effect**：宿主可能不 dispose 就重跑模块（`loaded without registering` 的恢复路径），而 Web 服务器对重复 `(kind, path)` 是**抛错**。原来一抛错，归档钩子与保留期定时器两个 effect 根本不会注册——插件看起来装好了，却永不清扫、永不自动入站。现在注册前先释放陈旧句柄。
+- **自动归档不再消耗用户的删除配额**：`limiter.take(1)` 与 `/delete` 共用预算，一轮批量归档就能把当分钟额度吃满，让用户为一次自己没发起的删除吃 429。自动路径改用独立 reservation（它本来就被宿主的归档事件频率约束，且审计里单独归因）。
+- **`/preview` 不再回传绝对 `workspace.path`**：这是 SUCCESS 响应，不经过 `redactDetails`，绝对路径会直接落到浏览器；而客户端只按 `id/title` 分组，`path` 是纯冗余泄露面。
+- **跨插件写灵枢索引会报冲突而不是假成功**（`lib/core/memory/json-index-adapter.js`）：写完 `_index.json` 后**读回校验**被摘掉的节点确实不在；另一个写入方（`md_cg` 回放自己的 snapshot+log）把节点写回来时，删除以 `E_MEMORY_CONFLICT`（`retryable:true`）失败而不是宣称完成。新增错误码与两语言文案。
+- **`GET /state` 也要私有 header**：它可以在没有 `connection` 层的组合里被读，原先等于把限额、adapter 可用性、自动归档开关开放给本机任意进程。客户端本来就每个请求都带该 header。
+- **僵死文件锁的容忍从 20 分钟降到 1 个 stale 窗口**：活 pid 的锁原来要 `staleMs * 10` 才打破，等于二十分钟里每次删除/恢复/purge 都答 `E_LOCK_BUSY`（用户感受与卡死无异）。心跳是 5s，`staleMs` 已容忍两打以上漏跳。
+- **`dsh.client.inject` 收敛到 1 项**：原来列了 6 个包，而 `client.js` 只经 `ctx.slots`（由 `ui-renderer` 提供）拿能力。inject 边是「等目标就绪」，多列只会在某个 profile 禁用（如 `ui-settings`）时让整条 fiber 长期 pending、菜单项静默消失。`manifest.test.mjs` 改成断言**不许**再把这 5 个加回来。
+- **横幅文案不再把「30 天」说成准时**（中英双语）：积压时按每轮 20 条、每 6 小时分批清扫，最多顺延 6 小时以上。
+- **`tests: api.test.mjs` 的固定 300ms flush 改成谓词轮询**：那一步要拿跨进程锁再写 manifest，耗时取决于 I/O 而不是 tick 数，负载高的机器上会随机报 `0 !== 1`（本次评审首次复跑就命中）。
+- **测试名与行为相反的用例改名**：`…purged by the next listing` → `…purged by a sweep, never by a listing`（`GET /trash` 无副作用是现行契约）。
+- **`archive hook: handler returned a promise` 从日志升级为可断言**：`registerArchiveHook` 现在返回 `violations`（并可配 `DSH_CONVERSATION_RECYCLE_BIN_STRICT_ARCHIVE=1` 升为 error）。这条违约本身就是 registry 自锁，靠一行 warn 兜底不够。
+
+### Added
+
+- **CI 真的执行宿主契约门禁**：`.github/workflows/ci.yml` 原来只有 `check`/`test`/`pack`，而 CHANGELOG 把 `check:host-api` 称作「上线前硬断言」——没有任何东西跑它。现在加了一步；runner 上没有桌面宿主时用 `--allow-missing-host` **打印 SKIP**（不是静默绿），在有宿主的机器/发布机上则是真门禁。
+- **数据布局黄金向量**（`scripts/verify-host-api.mjs`）：断言宿主的 `projectKey` 251 上限与 `~XXXX` 转义仍在，且插件自己的 `projectKey('D:\\Work') === '--D-Work--'`、`encodeSessionSegment('a/b') === 'a~002Fb'`、`PROJECTION_VERSION` 仍为 7。这些是宿主私有格式，改一个字符就会把会话还原到错误目录或让所有标题变空。
+- **`check:host-runtime` 在默认安装上可用了**：401 时再读一次响应体，若是插件自己的错误信封就判「已挂载、栅栏生效」并 exit 0（宿主的 404 不可能产生那个信封）。原先它在默认安装上恒 exit 2，等于「升级后到底挂没挂」这个唯一检查从没被执行。
+- **真实 `http.ServerResponse` 的 smoke 用例**：夹具的 `res` 只有 `statusCode/end`，header 类回归测不出来；新增一条经 `node:http` 回环的 `/state` + `/preview` 请求。
+
+### Changed
+
+- `engines.dsh` 上界 `<0.3.0-0` → `<0.4.0-0`。旧值会让 0.3.0 的宿主在 `profile.ts` 直接**抛错拒载**。代价是区间覆盖了本版本未回归的宿主线，因此 `check:host-api` 在非 0.2.x 宿主上打印 `WARN`。
+- README §4.5/§8 补齐：自动条目需手动彻底删除、限流是进程内的、桌面端 `requireSameOrigin` 不构成防护（边界只有 `connection` 层）、`E_MEMORY_CONFLICT` 的语义。
+
+### Not verified in this release
+
+评审无法执行的部分仍然是计划而非结论：桌面端与网页端的真机 E2E（预览→删除→回收站→恢复→彻底删除，需 launch URL 或 cookie）、两个 Host 共用一个 `DSH_HOME` 的并发删除、kill 进程中断 purge 后的恢复、低磁盘/杀软占用。本机宿主树还被第三方工具动过（`app.asar.rename-pending` + 一份 `phase:"failed"` 的 purge handoff），建议在干净安装上复验一次。
 ## [0.3.24] — 2026-11-14
 
 新功能：**归档 → 回收站**。被归档的会话自动登记进回收站，再由既有保留期清扫在 `trashRetentionDays`（默认 30）天后彻底删除，**关联记忆永不被这条路径触碰**。设置页可关闭，默认在升级后一次性询问。

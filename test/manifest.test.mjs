@@ -19,14 +19,25 @@ test('manifest: package identity, exports and Bundle/Client declarations', async
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
   assert.equal(pkg.dsh.client.platform, 'web')
   assert.ok(Array.isArray(pkg.dsh.client.inject))
-  for (const packageName of [
-    '@deepseek-ai/dsh-client-ui-renderer',
+  // Exactly the package that PROVIDES the service this bundle consumes
+  // (`slots`, from ui-renderer). `client.js` requires nothing else — every
+  // other capability arrives through slots — so listing more rows can only
+  // hurt: a Cordis inject edge waits for its target to be READY, and a profile
+  // that disables (say) ui-settings would leave this fiber pending forever,
+  // with the menu entry silently missing and no error anywhere.
+  assert.deepEqual(pkg.dsh.client.inject, ['@deepseek-ai/dsh-client-ui-renderer'])
+  for (const optional of [
     '@deepseek-ai/dsh-client-ui-workspace',
     '@deepseek-ai/dsh-client-ui-conversation',
     '@deepseek-ai/dsh-client-ui-settings',
     '@deepseek-ai/dsh-client-locale',
+    '@deepseek-ai/dsh-client-connection',
   ]) {
-    assert.ok(pkg.dsh.client.inject.includes(packageName), `missing dsh.client.inject entry ${packageName}`)
+    assert.equal(
+      pkg.dsh.client.inject.includes(optional),
+      false,
+      optional + ' must stay out of dsh.client.inject: nothing in client.js consumes it, and a disabled row would stall the bundle',
+    )
   }
   const covered = (file) => pkg.files.some((entry) => {
     if (entry === file) return true

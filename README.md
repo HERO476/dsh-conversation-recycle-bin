@@ -129,6 +129,8 @@ memory  →  messages  →  session/catalog
 > **红线（0.3.22 起）**：`allowedHosts` 只用于**已知**的反向代理。当前宿主会认证**非 owner peer**（远程访问授权），而 `requestRejection` 只回答「认证与否」；一旦把本路由经代理/隧道暴露出去，这种 peer 也能删除会话。对外暴露时**同时打开 `requireOwnerPeer: true`**（插件会向 connection 层索取 principal，非 owner 与「取不到 principal」一律拒绝）。
 >
 > 另两条边界：桌面端壳会把宿主 cookie 注入 renderer 并向本路由转发任意路径，因此**UI 内的任意脚本（含第三方 UI 插件）与面板同权**；`dsh-app://app` 的 origin 豁免在当前宿主已不可达（桌面壳改用 `http://127.0.0.1:<port>` 开窗），保留该分支只是纵深防御。
+>
+> **桌面端的第一道门是空转的**：`forwardWebRequest` 会删掉 `origin` 与 `sec-fetch-site` 再转发，插件的同源校验对「无 Origin」按放行处理。所以桌面端真正拦人的只有 DSH `connection` 层——评估安全面时不要把 `requireSameOrigin` 算成桌面端防护。
 
 | 配置 | 匹配 | 说明 |
 |---|---|---|
@@ -189,9 +191,11 @@ memory  →  messages  →  session/catalog
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 
-### 4.5 归档 → 回收站（`autoArchive`）
+### 4.5 归档 → 回收站（`autoArchive`，自动条目需手动彻底删除）
 
-把一个被**归档**的会话自动登记进回收站，再由上面的保留期清扫在 `trashRetentionDays` 天后彻底删除。**关联记忆永不被这条路径触碰**（入口硬编码 `includeMemory:false`，且 `performPurge` 对该来源的条目有 `E_MEMORY_GUARD` 兜底）。
+把一个被**归档**的会话自动登记进回收站。**关联记忆永不被这条路径触碰**（入口硬编码 `includeMemory:false`，且 `performPurge` 对该来源的条目有 `E_MEMORY_GUARD` 兜底）。
+
+> **自动条目不会被保留期清理。** 换句话说：`trashRetentionDays` 只管用户自己删的条目。宿主的 `archive` 契约是「隐藏会话、保留日志」，把这个可逆动作接到「N 天后无人值守永久删除」上，等于让侧栏里一次整理在 30 天后变成数据丢失；本机实测归档集合可以是三四百条的量级。所以 `origin:"auto-archive"` 的条目只能由用户在回收站里**显式**彻底删除（`sweepExpiredTrash()` 会把它们单独记进返回值的 `deferred`，而不是悄悄跳过）。
 
 | 事实 | 说明 |
 |---|---|
@@ -204,7 +208,7 @@ memory  →  messages  →  session/catalog
 | 审计归因 | 自动路径记 `actor:"system:archive-auto"`、`source:"auto-archive"`，并且**不写标题**（`title:null`），与 purge 的既有口径一致。 |
 | 时钟护栏 | 同一进程内两次清扫间隔 > 24h 视为墙钟跳变（NTP 纠偏、快照恢复、手改时间）：本轮只推进高水位、不销毁，下一轮（6h 后）恢复正常。首次启动不设护栏——机器确实没运行，条目确实更旧。 |
 | 恢复语义 | 由归档产生的条目，快照里 `archived:true`；「恢复」对该来源强制**取消归档**，否则会「提示恢复成功、会话仍隐藏」。 |
-| 开关 | 三态 `unasked / on / off`，存 `<dataDir>/auto-archive.json`（不是配置：配置在激活期只读，没有写配置路由）。**`unasked` 永不执行**——「默认开启」表现为升级提示里预选「开启」，而不是替用户启动不可逆计时。关闭只挡**新增**，已在册条目仍按 30 天走完（否则「关开关」= 数据永驻）。 |
+| 开关 | 三态 `unasked / on / off`，存 `<dataDir>/auto-archive.json`（不是配置：配置在激活期只读，没有写配置路由）。**`unasked` 永不执行**——「默认开启」表现为升级提示里预选「开启」，而不是替用户启动不可逆计时。关闭只挡**新增**；已在册条目照样留在回收站，直到用户手动彻底删除（保留期对自动条目不再生效，见本节开头）。 |
 | 提示 | 设置页一次性询问，去重状态在宿主侧（清浏览器缓存不会重复弹、也不能被伪造跳过）。`enabled:false` 时该 ack 路由仍可达（否则问题永远答不了），但它只写状态文件、不删任何东西。 |
 | 何时不可用 | 宿主没有事件总线 / 不发布该事件时：`/state.autoArchive.hookAvailable=false`，设置页明说「无法运行」，不会假装承诺 30 天清理。`npm run check:host-api` 也断言这两个事件仍然存在。 |
 
@@ -311,6 +315,11 @@ npm run check:host-runtime -- --launch=<桌面端 Host 启动 URL>   # 运行态
 9. 回收站页面的保留期清理不是即时的：`GET /trash` 无副作用，过期条目由定时器（启动后 60s 首扫、之后每 6h）或用户显式 purge 移除，因此最多可能比 `trashRetentionDays` 多存活 6 小时。
 10. 宿主不校验插件前缀路由的 Origin/CSRF（0.2.2-alpha.3 实测：带 cookie 的跨站请求返回 200），鉴权由插件自己完成——cookie 会话 + 私有请求头 + `requireSameOrigin`。把 Web 暴露到 loopback 之外时用 `allowedHosts` 精确放行（见 §4.2 的反代表）；`allowNonLoopback: true` 会跳过整段 Host 校验、使 `allowedHosts` 失效，只应作为"我完全信任本机所有进程"的显式选择。
 11. `package.json` 的 `dsh.manifestVersion` 与 `config.schema.json` 是文档性声明，当前宿主不读取它们（全仓 grep 零命中）；`engines.dsh` 才是唯一被执行的兼容门。
+12. **保留期不会自动清理「归档自动入站」的条目。** 宿主的 `archive` 语义是「隐藏会话、保留日志」，一条可逆的侧栏操作不该在 N 天后变成永久删除；因此 `origin: "auto-archive"` 的回收站条目只能由用户在回收站里显式彻底删除，`sweepExpiredTrash()` 会把它们记进返回值的 `deferred`。普通条目（用户自己删的）仍按 `trashRetentionDays` 清理。
+13. **限流是进程内的。** `maxDeletesPerMinute` 的计数活在插件 fiber 里；桌面端与 `dsh web` 同时运行、共用一个 `DSH_HOME` 时，实际预算会翻倍，审计与界面也各算各的。
+14. **`requireSameOrigin` 在桌面端不构成防护。** 桌面壳的 `forwardWebRequest` 会删掉 `origin` / `sec-fetch-site` 再转发，插件对「没有 Origin」的请求按放行处理（插件自己的注释也写了这点）。桌面端的真实边界是 DSH `connection` 层；`requireSameOrigin` 只在 Web 端有意义。
+15. **跨插件写索引的冲突会被报出来，而不是被吞掉。** 勾选「一并删除关联记忆」时，插件会把节点从 `md_cg` 的 `_index.json` 里摘掉、写回、再读一遍确认；如果并发的 `md_cg` 把节点写了回来，删除会以 `E_MEMORY_CONFLICT`（可重试）失败而不是宣称成功。它是 `retryable: true` 的普通拒绝——重试即可。
+16. `engines.dsh` 的上界已放宽到 `<0.4.0-0`（旧值 `<0.3.0-0` 会让 0.3.0 的宿主直接**拒绝加载**插件）。代价是区间覆盖了本版本未回归验证的宿主线：`check:host-api` 在非 0.2.x 宿主上会打印 `WARN`，发布前应在该宿主上跑完整套件与一次真实删除。
 
 ---
 

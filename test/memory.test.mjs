@@ -634,3 +634,46 @@ test('memory adapter: a failed export leaves a restorable rescue bundle', async 
     await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
   }
 })
+
+test('json index: a writer that restores the deleted nodes turns the deletion into a retryable conflict', async () => {
+  // md_cg shares this index and does not take the plugin's lock: it re-reads,
+  // replays its own snapshot+log and writes the whole file back. A rename
+  // "succeeds" either way, so without a read-back the plugin reported a
+  // deletion the user could still see. The conflict must surface instead.
+  const store = await makeStore()
+  const root = join(process.cwd(), 'test', '.tmp', `md-conflict-${Date.now()}`)
+  const trashDir = join(root, 'trash', 'entry-1')
+  try {
+    const original = await readFile(join(store.root, '_index.json'), 'utf8')
+    const realFs = await import('node:fs/promises')
+    let restored = false
+    const fsApi = {
+      ...realFs,
+      async rename(from, to) {
+        const result = await realFs.rename(from, to)
+        if (!restored && String(to).endsWith('_index.json')) {
+          restored = true
+          await realFs.writeFile(to, original, 'utf8')
+        }
+        return result
+      },
+    }
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'probe',
+      label: 'probe',
+      indexFile: join(store.root, '_index.json'),
+      rootDir: store.root,
+      sessionField: 'session',
+      nodesPointer: '/nodes',
+      fsApi,
+    })
+    await assert.rejects(
+      adapter.exportSession(SESSION_1, trashDir),
+      (error) => error.code === 'E_MEMORY_CONFLICT' && error.details?.retryable === true,
+    )
+    assert.equal(restored, true, 'the fixture must actually have exercised the race')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
+    await store.cleanup()
+  }
+})
