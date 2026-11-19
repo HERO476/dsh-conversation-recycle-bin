@@ -3,6 +3,39 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.26] — 2026-11-19
+
+宿主升到 **0.2.2-rc.5**（`dshBuildCommit 3f85d88`），三方复审判定：**rc.3→rc.5 没有与插件相关的破坏性变更**，授权主链完好（`requireOwnerPeer` 在 rc.5 的真实 `PeerAdmission` 上实测 200）、插件在 3080 上真实挂载（`GET /api/state` 返回插件自有 JSON 信封）。
+
+这一版修的是 **0.3.25 自己没收口的边缘**——其中三条是那一轮的修法带来的新问题，一条是门禁变成了假门禁。
+
+### Fixed
+
+- **陈旧 cleanup 会删掉在册路由（0.3.25 幂等修法的副作用）**：宿主 `webServer.register` 返回的 disposer 是 `table.delete(route.path)`——**按路径删，不认句柄身份**。0.3.25 让第二次 `apply` 先释放旧句柄再注册，于是旧 fiber 稍后的 cleanup 会把**新**注册的路由删掉：整个 API 404、无任何异常日志，用户只看到空白面板。cleanup 现在先判身份（`activeRouteDispose !== dispose` 直接 return）。三方各自用假宿主精确复刻 rc.5 语义独立复现了同一序列（`apply`→`apply` 不抛 `routes=1` → 跑旧 cleanup `routes=0`）。
+- **自动归档条目的倒计时是假承诺**：0.3.25 让清扫永不 retire `origin:'auto-archive'` 的条目（宿主的 archive 语义是「隐藏但保留日志」），但 `serializeEntry` 仍在发 `daysLeft/expiresAt`，客户端照旧渲染「N 天后自动清理」。现在这类条目返回 `daysLeft:null, expiresAt:null, hold:'auto-archive'`，客户端渲染「保留到你手动删除（归档条目不会自动过期）」。方向与 0.3.24 修过的「倒计时撒谎」相反，落在隐私承诺上。
+- **`/sessions`、`/trash`、`/audit` 也要求私有 header**：0.3.25 只补了 `/state`。在 `requireConnection:false` 的组合里，本机任意进程原本可读到会话标题、被删标题、审计尾部。校验现在提到 GET 分派之前统一执行。
+- **`verify-host-contract` 的两处请求补上私有 header**：0.3.25 的 `/state` 门禁把它自己的认证路径打死了——带 cookie 时拿 403 并 `exit≠0`，于是「升级后自检可用」这个卖点只在无凭据路径成立。
+- **僵死锁用例不可能失败**：0.3.25 把阈值从 10 个窗口降到 1 个（20 分钟 → 2 分钟），用例却还回拨 21 分钟——无论阈值改回多少它都通过。改成两段式：回拨 48s 必须 `E_LOCK_BUSY`（守住「活 pid 不因年龄被抢」），回拨 3 分钟必须抢到（守住修复本身）。`file-lock.js` 顶部注释同步。
+- **灵枢回读只单向**：`assertNodesAbsent` 只证明「我们删的节点没了」。本适配器是整文件 rename 覆盖，若另一位写入方（`md_cg`）在窗口内 append 了节点，那次写入会被静默吞掉——而删除检查照样通过。现在写前记录非目标节点集合，写完断言「一个都没少」，否则 `E_MEMORY_CONFLICT`（可重试）。
+- **`admit()` 的 rejection 被误标成 503**：会话可能在 `requestRejection` 与 `ownerPeerVerdict` 之间失效，此时 `admit` 返回 `{rejection}`，被兜底成「无法核实身份」。现在透传 401/403。
+
+### Added
+
+- **宿主契约快照**：`host-contract.snapshot.json` 记录本机在 **0.2.2-rc.5** 上跑过的 20 条断言；`--snapshot=` 在 CI 里校验「记录的断言一条都没被删掉/改名」，`--write-snapshot=` 刷新。CI 步骤现在会打印 `SKIP  20 host-API assertion(s) were NOT executed (last proven on 0.2.2-rc.5)`，而不是一句含糊的绿。
+- **`npm run check:host-api:strict`**（`--require-host`）：发布清单用，没有宿主即失败，杜绝「本机跑不到就跳过」。
+- **slot 挂载可观测**：`slots.inject` 的四处注册包了 try/catch，并用 5s 超时把「slot 一直没出现」写成一条 warn；`exports.__slotState()` 暴露 `pending/waiting/mounted/failed`。宿主对未声明 slot 是静默等待、对抛错的 callback 是**永久退役该注入**——两者在界面上都只表现为「入口不见了」。
+- **`/state.retention.deferred`**：被清扫刻意延后的自动条目数量，配合 `hold` 让「为什么 30 天后还在」有据可查。
+
+### Changed
+
+- **自动归档有了自己的有界预算**（每小时 120 条）。0.3.25 为修「自动归档吃用户配额」把 reservation 设成 `Infinity`，等于取消节流；现在独立、宽松、有界，失败会退还名额，用户配额仍不受影响。
+- **投影版本门禁不再自指**：原来只 grep 插件自己的 `PROJECTION_VERSION = 7`，宿主升到 8 它也绿。现在读宿主 `dsh-session-projection-cache` 的 spec 比对（当前 `host 7 vs plugin 7`）。
+
+### Not verified
+
+真机 E2E（桌面 + 网页，预览→删除→回收站→恢复→彻底删除）、浏览器里 UI 三处入口的可见性、两 Host 共用 `DSH_HOME` 的并发删除、kill 进程中断 purge 的恢复、低磁盘/杀软占用。
+
+环境注脚：本机 `resources\app.reapply-failed-20261119`（rc.5 解包备份，reapply 失败）与 `.dsh/dsh-purge/unpacked-asar.json` 的过期记账表明第三方 purge 工具链在该版本上 reapply 失败过；宿主 asar 本身是 stock rc.5（asar 内 `.dshpurge.bak` 计数为 0），故本轮结论按 stock rc.5 判定，但**干净安装复验仍然值得做一次**。
 ## [0.3.25] — 2026-11-18
 
 一轮三方评审（架构 / AppSec / 验收）对 v0.3.24 @ DSH 0.2.2-rc.3 的完整复盘的落地。评审确认了点：宿主没换（`0.2.2-rc.3` 三处一致），真正的增量在插件侧；插件在 6108 上真实挂载（`GET /state` 返回**插件自己的** JSON 信封，而宿主的 401 是纯文本）。

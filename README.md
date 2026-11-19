@@ -210,7 +210,7 @@ memory  →  messages  →  session/catalog
 | 恢复语义 | 由归档产生的条目，快照里 `archived:true`；「恢复」对该来源强制**取消归档**，否则会「提示恢复成功、会话仍隐藏」。 |
 | 开关 | 三态 `unasked / on / off`，存 `<dataDir>/auto-archive.json`（不是配置：配置在激活期只读，没有写配置路由）。**`unasked` 永不执行**——「默认开启」表现为升级提示里预选「开启」，而不是替用户启动不可逆计时。关闭只挡**新增**；已在册条目照样留在回收站，直到用户手动彻底删除（保留期对自动条目不再生效，见本节开头）。 |
 | 提示 | 设置页一次性询问，去重状态在宿主侧（清浏览器缓存不会重复弹、也不能被伪造跳过）。`enabled:false` 时该 ack 路由仍可达（否则问题永远答不了），但它只写状态文件、不删任何东西。 |
-| 何时不可用 | 宿主没有事件总线 / 不发布该事件时：`/state.autoArchive.hookAvailable=false`，设置页明说「无法运行」，不会假装承诺 30 天清理。`npm run check:host-api` 也断言这两个事件仍然存在。 |
+| 何时不可用 | 宿主没有事件总线 / 不发布该事件时：`/state.autoArchive.hookAvailable=false`，设置页明说「无法运行」，不会假装承诺 30 天清理。`npm run check:host-api` 也断言这两个事件仍然存在（发布前用 `npm run check:host-api:strict`：没有宿主直接失败，而不是跳过）。 |
 
 ---
 
@@ -315,11 +315,12 @@ npm run check:host-runtime -- --launch=<桌面端 Host 启动 URL>   # 运行态
 9. 回收站页面的保留期清理不是即时的：`GET /trash` 无副作用，过期条目由定时器（启动后 60s 首扫、之后每 6h）或用户显式 purge 移除，因此最多可能比 `trashRetentionDays` 多存活 6 小时。
 10. 宿主不校验插件前缀路由的 Origin/CSRF（0.2.2-alpha.3 实测：带 cookie 的跨站请求返回 200），鉴权由插件自己完成——cookie 会话 + 私有请求头 + `requireSameOrigin`。把 Web 暴露到 loopback 之外时用 `allowedHosts` 精确放行（见 §4.2 的反代表）；`allowNonLoopback: true` 会跳过整段 Host 校验、使 `allowedHosts` 失效，只应作为"我完全信任本机所有进程"的显式选择。
 11. `package.json` 的 `dsh.manifestVersion` 与 `config.schema.json` 是文档性声明，当前宿主不读取它们（全仓 grep 零命中）；`engines.dsh` 才是唯一被执行的兼容门。
-12. **保留期不会自动清理「归档自动入站」的条目。** 宿主的 `archive` 语义是「隐藏会话、保留日志」，一条可逆的侧栏操作不该在 N 天后变成永久删除；因此 `origin: "auto-archive"` 的回收站条目只能由用户在回收站里显式彻底删除，`sweepExpiredTrash()` 会把它们记进返回值的 `deferred`。普通条目（用户自己删的）仍按 `trashRetentionDays` 清理。
+12. **保留期不会自动清理「归档自动入站」的条目。** 宿主的 `archive` 语义是「隐藏会话、保留日志」，一条可逆的侧栏操作不该在 N 天后变成永久删除；因此 `origin: "auto-archive"` 的回收站条目只能由用户在回收站里显式彻底删除，`sweepExpiredTrash()` 会把它们记进返回值的 `deferred`。普通条目（用户自己删的）仍按 `trashRetentionDays` 清理。`/trash` 对这类条目**不再下发倒计时**（`hold: "auto-archive"`，`daysLeft` 与 `expiresAt` 都是 `null`），客户端渲染「保留到你手动删除」；`/state.retention.deferred` 给出最近一轮被刻意延后的条数——否则「为什么 30 天后还在」在产品里没有任何解释。
 13. **限流是进程内的。** `maxDeletesPerMinute` 的计数活在插件 fiber 里；桌面端与 `dsh web` 同时运行、共用一个 `DSH_HOME` 时，实际预算会翻倍，审计与界面也各算各的。
 14. **`requireSameOrigin` 在桌面端不构成防护。** 桌面壳的 `forwardWebRequest` 会删掉 `origin` / `sec-fetch-site` 再转发，插件对「没有 Origin」的请求按放行处理（插件自己的注释也写了这点）。桌面端的真实边界是 DSH `connection` 层；`requireSameOrigin` 只在 Web 端有意义。
 15. **跨插件写索引的冲突会被报出来，而不是被吞掉。** 勾选「一并删除关联记忆」时，插件会把节点从 `md_cg` 的 `_index.json` 里摘掉、写回、再读一遍确认；如果并发的 `md_cg` 把节点写了回来，删除会以 `E_MEMORY_CONFLICT`（可重试）失败而不是宣称成功。它是 `retryable: true` 的普通拒绝——重试即可。
-16. `engines.dsh` 的上界已放宽到 `<0.4.0-0`（旧值 `<0.3.0-0` 会让 0.3.0 的宿主直接**拒绝加载**插件）。代价是区间覆盖了本版本未回归验证的宿主线：`check:host-api` 在非 0.2.x 宿主上会打印 `WARN`，发布前应在该宿主上跑完整套件与一次真实删除。
+16. **本机宿主树被第三方工具动过，结论按 stock 宿主判定。** `resources\app.reapply-failed-20261119` 是一次失败的 reapply（内容仍是 rc.5），`.dsh/dsh-purge/unpacked-asar.json` 的记账还停在 rc.3 的尺寸，但当前 `app.asar` 内部 `.dshpurge.bak` 计数为 0（未打补丁）。所以「rc.5 上成立」指的是宿主原件的行为；干净安装上再复验一次仍然值得做。
+17. `engines.dsh` 的上界已放宽到 `<0.4.0-0`（旧值 `<0.3.0-0` 会让 0.3.0 的宿主直接**拒绝加载**插件）。代价是区间覆盖了本版本未回归验证的宿主线：`check:host-api` 在非 0.2.x 宿主上会打印 `WARN`，发布前应在该宿主上跑完整套件与一次真实删除。
 
 ---
 

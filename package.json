@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-recycle-bin",
-  "version": "0.3.25",
+  "version": "0.3.26",
   "description": "DSH conversation deletion with an optional, previewed cascade into conversation-associated memory: soft delete + recycle bin, audit trail, batch rate limits and per-session rollback. 删除对话（可选一并删除关联记忆）：软删除与回收站、审计留痕、批量限流、失败回滚。",
   "repository": {
     "type": "git",
@@ -62,6 +62,7 @@
     "test": "node scripts/run-tests.mjs",
     "check": "node scripts/check-syntax.mjs && node test/manifest.test.mjs",
     "check:host-api": "node scripts/verify-host-api.mjs",
+    "check:host-api:strict": "node scripts/verify-host-api.mjs --require-host",
     "check:host-runtime": "node scripts/verify-host-contract.mjs",
     "prepack": "node scripts/clean-tmp.mjs"
   },

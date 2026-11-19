@@ -1757,18 +1757,20 @@ test('mutation lock: a lock that cannot be removed on release is demoted instead
   }
 })
 
-test('mutation lock: a lock held by a live pid with no heartbeat for ten windows is broken', async () => {
+test('mutation lock: a live pid is broken after ONE stale window, and not before', async () => {
   const home = await makeTempHome()
   try {
     const lockPath = join(home.root, 'mutation.lock')
     const fsp = await import('node:fs/promises')
-    await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, nonce: 'held', at: Date.now() })}
+    const writeStale = async (ageMs) => {
+      await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, nonce: 'held', at: Date.now() })}
 `, 'utf8')
-    const stale = new Date(Date.now() - 21 * 60_000)
-    await fsp.utimes(lockPath, stale, stale)
-    const lock = createFileLock({
+      const when = new Date(Date.now() - ageMs)
+      await fsp.utimes(lockPath, when, when)
+    }
+    const makeLock = () => createFileLock({
       lockPath,
-      timeoutMs: 1_000,
+      timeoutMs: 1_500,
       staleMs: 120_000,
       retryMs: 5,
       // The pid is alive, so only the missing heartbeat can prove it is not the
@@ -1776,8 +1778,20 @@ test('mutation lock: a lock held by a live pid with no heartbeat for ten windows
       isProcessAlive: () => true,
       warn: () => {},
     })
-    const release = await lock.acquire()
+
+    // Below one window a live owner is never broken by age: a GC pause must not
+    // let a second writer in. This half is what makes the test able to FAIL.
+    await writeStale(48_000)
+    await assert.rejects(makeLock().acquire(), (error) => error.code === 'E_LOCK_BUSY')
+
+    // Past one window the heartbeat cannot be that late, so it is broken. The
+    // fixture used to sit at 21 minutes, which passed whether the tolerance was
+    // one window (2 min) or ten (20 min) — the regression could never fail, so
+    // the 20-minute E_LOCK_BUSY could silently come back.
+    await writeStale(180_000)
+    const release = await makeLock().acquire()
     await release()
+    assert.equal(await pathExists(lockPath), false)
   } finally {
     await home.cleanup()
   }
@@ -2094,6 +2108,48 @@ test('transport: the handler survives a real http.ServerResponse (status, header
   } finally {
     await new Promise((resolve) => server.close(resolve))
     await fixture.home.cleanup()
+  }
+})
+
+test('boot: a stale fiber cleanup never removes the route a newer apply installed', async () => {
+  // The Host's disposer is `table.delete(route.path)` — it deletes by PATH, not
+  // by handle identity. Once a second apply() has replaced the route, the first
+  // fiber's cleanup must be a no-op; otherwise the live route disappears and
+  // every request 404s with no error anywhere.
+  const home = await makeTempHome()
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home.root
+  try {
+    const { apply, ROUTE_PREFIX } = await import('../lib/index.js')
+    const routes = new Map()
+    const webServer = {
+      register({ kind, path, handler }) {
+        if (routes.has(path)) throw new Error(`webserver: duplicate ${kind} route "${path}"`)
+        routes.set(path, { kind, path, handler })
+        return () => { routes.delete(path) }
+      },
+    }
+    const makeCtx = (sink) => ({
+      on: () => () => {},
+      effect: (fn) => { sink.push(fn()) },
+      webServer,
+      get: () => undefined,
+    })
+    const first = []
+    apply(makeCtx(first), {})
+    assert.equal(routes.has(ROUTE_PREFIX), true)
+    const second = []
+    apply(makeCtx(second), {})
+    assert.equal(routes.has(ROUTE_PREFIX), true, 'the second apply must not throw')
+    // Out-of-order cleanup: the replaced fiber tears down AFTER the new one is live.
+    for (const cleanup of first) cleanup()
+    assert.equal(routes.has(ROUTE_PREFIX), true, 'a stale cleanup removed the live route')
+    for (const cleanup of second) cleanup()
+    assert.equal(routes.has(ROUTE_PREFIX), false, 'the live cleanup must still release the route')
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    await home.cleanup()
   }
 })
 
@@ -2564,8 +2620,13 @@ test('auto: archiving files exactly one entry, with no memory and soft mode', as
     assert.equal(entry.mode, 'soft')
     assert.equal(entry.includeMemory, false)
     assert.equal(entry.memory, 0)
-    assert.equal(entry.daysLeft, 30)
-    assert.equal(typeof entry.expiresAt, 'number')
+    // An automatic entry is never purged by the sweep, so it carries no
+    // deadline: `hold` says why, and the countdown fields stay null. (Before
+    // 0.3.26 this asserted daysLeft === 30 while the janitor never retired
+    // the row — a countdown the Host had already decided not to keep.)
+    assert.equal(entry.hold, 'auto-archive')
+    assert.equal(entry.daysLeft, null)
+    assert.equal(entry.expiresAt, null)
 
     // Memory is untouched on disk.
     const indexFile = join(fixture.home.root, '.dsh-memory', 'data', 'mdcg', '_index.json')
@@ -2822,6 +2883,43 @@ test('auto: automatic filing does not spend the user delete budget', async () =>
     // interactive budget.
     const state = await call(fixture.api, '/state', { method: 'GET' })
     assert.equal(state.body.state.limits.rate.used, 0)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('auto: a held entry advertises no countdown in /trash', async () => {
+  const fixture = await makeAutoFixture()
+  try {
+    await call(fixture.api, '/archive-auto/ack', { body: { decision: 'on' } })
+    await markArchived(fixture, S1)
+    fixture.bus.fire('archived', S1)
+    await flushScheduled(async () => (await call(fixture.api, '/trash', { method: 'GET' })).body.entries.length === 1)
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    const entry = trash.body.entries[0]
+    // The sweep never retires an automatic entry, so a countdown here would be a
+    // promise the Host has already decided not to keep — the same lie 0.3.24
+    // fixed in the other direction.
+    assert.equal(entry.hold, 'auto-archive')
+    assert.equal(entry.daysLeft, null)
+    assert.equal(entry.expiresAt, null)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('trash: a user entry still carries its countdown', async () => {
+  const fixture = await makeFixture({ sessionIds: [S1] })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1] } })
+    const token = preview.body.preview.confirmation.token
+    await call(fixture.api, '/delete', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: token } })
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    const entry = trash.body.entries[0]
+    // The hold applies to archived entries only; a user deletion keeps its
+    // retention promise (and this assertion is what proves the two differ).
+    assert.equal(entry.hold, null)
+    assert.notEqual(entry.daysLeft, null)
   } finally {
     await fixture.home.cleanup()
   }

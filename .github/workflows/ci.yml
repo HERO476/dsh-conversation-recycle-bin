@@ -103,15 +103,20 @@ jobs:
       # package and asserts exactly those shapes.
       #
       # A CI runner has no desktop Host installed, so the step passes with an
-      # explicit SKIP line instead of a silent green; wherever DSH_HOST_DIR
-      # points at an installation (developer machine, release job) the same step
-      # is a real gate. It ran nowhere at all before this — the changelog called
-      # it a pre-release hard assertion while nothing executed it.
+      # explicit SKIP line that says HOW MANY assertions were not executed and
+      # which build last proved them — a bare green here would look like
+      # coverage. Wherever DSH_HOST_DIR points at an installation (developer
+      # machine, release job) the same step is a real gate.
+      #
+      # `--snapshot=host-contract.snapshot.json` also fails when a recorded
+      # contract assertion stops running (someone deleted or renamed a check).
+      # It cannot detect a HOST change — that needs a real installation, which
+      # is why the release checklist runs this step with --require-host.
       - name: check (host API contract)
         shell: bash
         run: |
           set +e
-          npm run check:host-api -- --allow-missing-host > host-api.log 2>&1
+          npm run check:host-api -- --allow-missing-host --snapshot=host-contract.snapshot.json > host-api.log 2>&1
           status=$?
           cat host-api.log
           if [ "$status" -ne 0 ]; then

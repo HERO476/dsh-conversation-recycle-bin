@@ -115,6 +115,13 @@ async function acquireCredentials() {
   return null
 }
 
+/**
+ * The plugin's private header. Every read route requires it (the only thing a
+ * cross-site request cannot set without a preflight), so a probe that omits it
+ * reports a healthy Host as broken.
+ */
+const PLUGIN_HEADERS = { 'x-conversation-recycle-bin': '1' }
+
 const results = []
 function record(name, ok, detail) {
   results.push({ name, ok, detail })
@@ -135,7 +142,9 @@ function record(name, ok, detail) {
 async function probeMountEnvelope() {
   try {
     const response = await fetch(`${base}/conversation-recycle-bin/api/state`, {
-      headers: cookieHeader() === '' ? {} : { cookie: cookieHeader() },
+      // The plugin requires its private header on every read route (0.3.25+);
+      // without it an authenticated probe gets 403 instead of 200.
+      headers: { ...PLUGIN_HEADERS, ...(cookieHeader() === '' ? {} : { cookie: cookieHeader() }) },
     })
     const type = (response.headers.get('content-type') ?? '').toLowerCase()
     const text = await response.text()
@@ -203,7 +212,7 @@ async function main() {
 
   // 4. The plugin's own API must answer JSON, not the SPA 404 fallback.
   const state = await fetch(`${base}/conversation-recycle-bin/api/state`, {
-    headers: cookieHeader() === '' ? {} : { cookie: cookieHeader() },
+    headers: { ...PLUGIN_HEADERS, ...(cookieHeader() === '' ? {} : { cookie: cookieHeader() }) },
   })
   const body = await state.text()
   if (state.status === 401) {

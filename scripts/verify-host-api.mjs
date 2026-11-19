@@ -28,7 +28,7 @@
  *
  * Exit code: 0 = every assertion holds, 1 = drift found, 2 = host not found.
  */
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -36,6 +36,17 @@ import { join, resolve } from 'node:path'
 const args = process.argv.slice(2)
 const quiet = args.includes('--quiet')
 const allowMissingHost = args.includes('--allow-missing-host')
+/** Release-time mode: a missing Host is a FAILURE, never a skip. */
+const requireHost = args.includes('--require-host')
+/** Record the assertion list for this Host build (used to refresh the snapshot). */
+const writeSnapshotPath = args.find((value) => value.startsWith('--write-snapshot='))?.slice('--write-snapshot='.length) ?? ''
+/**
+ * Compare against a committed assertion list. Only the NAMES are compared: the
+ * pass/fail values depend on the Host that is installed, while the list of
+ * assertions is what a refactor can silently drop. This is what lets a
+ * Host-less CI runner notice that someone deleted a contract check.
+ */
+const snapshotPath = args.find((value) => value.startsWith('--snapshot='))?.slice('--snapshot='.length) ?? ''
 const hostArg = args.find((value) => value.startsWith('--host='))?.slice('--host='.length)
   ?? process.env.DSH_HOST_DIR
   ?? ''
@@ -218,13 +229,37 @@ function satisfiesRange(version, range) {
   return false
 }
 
+/** Read a committed assertion snapshot, tolerating a missing or malformed file. */
+async function readSnapshotQuietly(path) {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.assertions)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 async function main() {
   const host = await openHost()
   if (host === null) {
+    if (requireHost === true) {
+      console.log('FAIL  --require-host was passed but no dsh installation was found.')
+      console.log('      Run this where the desktop app is installed, or set DSH_HOST_DIR.')
+      return 2
+    }
     if (allowMissingHost === true) {
       // Loud on purpose: a CI run that quietly passes without reading a Host is
-      // worse than no gate, because it looks like coverage.
-      console.log('SKIP  no dsh installation found in this runner; host-API assertions were NOT executed.')
+      // worse than no gate, because it looks like coverage. Say exactly how much
+      // coverage was NOT executed, and against which build it was last proven.
+      const recorded = snapshotPath === '' ? null : await readSnapshotQuietly(snapshotPath)
+      if (recorded !== null) {
+        console.log(`SKIP  no dsh installation found in this runner; ${recorded.assertions.length} host-API assertion(s) were NOT executed.`)
+        console.log(`      Last proven on ${recorded.hostVersion}; refresh with:`)
+        console.log(`      npm run check:host-api -- --write-snapshot=${snapshotPath}`)
+      } else {
+        console.log('SKIP  no dsh installation found in this runner; host-API assertions were NOT executed.')
+      }
       console.log('      Run this on a machine with the desktop app (or set DSH_HOST_DIR) before releasing.')
       return 0
     }
@@ -375,7 +410,41 @@ async function main() {
     record('plugin session segment passes a plain id through', encodeSessionSegment('session-1') === 'session-1')
     record('plugin session segment escapes a separator', encodeSessionSegment('a/b') === 'a~002Fb', encodeSessionSegment('a/b'))
     const gatewaySource = await readFile(new URL('../lib/host/gateway.js', import.meta.url), 'utf8')
-    record('plugin projection constant is still 7', /PROJECTION_VERSION\s*=\s*7\b/.test(gatewaySource))
+    const pluginProjection = Number((gatewaySource.match(/PROJECTION_VERSION\s*=\s*(\d+)/) ?? [])[1])
+    // The previous version of this assertion only grepped the PLUGIN's own
+    // source for `= 7`, so a Host bump to 8 left it green while every row
+    // silently lost its title. Compare against the Host's own checkpoint spec.
+    const projectionSpec = await host.readFirst([
+      `${PKG('dsh-session-projection-cache')}/src/spec.ts`,
+      `${PKG('dsh-session-projection-cache')}/lib/index.js`,
+    ])
+    const hostProjection = projectionSpec === null
+      ? null
+      : Number(((projectionSpec.match(/version:\s*(\d+)/) ?? [])[1]))
+    record(
+      'plugin projection version matches the Host checkpoint spec',
+      Number.isFinite(pluginProjection) && hostProjection !== null && pluginProjection === hostProjection,
+      `host ${hostProjection} vs plugin ${pluginProjection}`,
+    )
+
+    if (writeSnapshotPath !== '') {
+      const snapshot = { hostVersion, assertions: results.map((item) => item.name) }
+      await writeFile(writeSnapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8')
+      if (quiet !== true) console.log(`\nsnapshot written: ${writeSnapshotPath} (${snapshot.assertions.length} assertion(s), host ${hostVersion})`)
+    }
+    if (snapshotPath !== '') {
+      const recorded = await readSnapshotQuietly(snapshotPath)
+      if (recorded === null) {
+        record('snapshot: the recorded assertion list is readable', false, snapshotPath)
+      } else {
+        const missing = recorded.assertions.filter((name) => !results.some((item) => item.name === name))
+        record(
+          'snapshot: every recorded contract assertion still runs',
+          missing.length === 0,
+          missing.length === 0 ? `${recorded.assertions.length} assertion(s)` : `missing: ${missing.join(', ')}`,
+        )
+      }
+    }
 
     const failed = results.filter((item) => item.ok !== true)
     if (failed.length > 0) {

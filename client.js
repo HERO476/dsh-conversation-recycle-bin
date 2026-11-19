@@ -115,6 +115,7 @@ window.__ModuleLoader__.load({
         'trash.retention': 'Entries are purged automatically about {days} days after deletion — roughly, not to the minute: a busy bin is swept in batches of 20 every 6 hours, and only while the Host is running (a phone with the app closed simply sweeps on the next launch). Set trashRetentionDays to 0 to keep them until you purge them yourself.',
         'trash.expiresIn': 'auto-purged in {days} d',
         'trash.expiresSoon': 'auto-purged on the next check',
+        'trash.autoHold': 'kept until you delete it (archiving never expires)',
         'trash.swept': 'The Host cleaned up {count} expired entries in the background.',
         'trash.sweptAgo': 'The Host cleaned up {count} expired entries {when}.',
         'time.justNow': 'just now',
@@ -311,6 +312,7 @@ window.__ModuleLoader__.load({
         'trash.retention': '条目在删除后约 {days} 天自动清理——是"约"不是"准时"：回收站积压时按每轮 20 条、每 6 小时分批清扫，且只在 Host 运行时发生（手机 App 关闭期间不会执行，下次启动时补扫）。把 trashRetentionDays 设为 0 可改为一直保留、由你自己彻底删除。',
         'trash.expiresIn': '{days} 天后自动清理',
         'trash.expiresSoon': '下次检查时自动清理',
+        'trash.autoHold': '保留到你手动删除（归档条目不会自动过期）',
         'trash.swept': 'Host 已在后台自动清理 {count} 条过期条目。',
         'trash.sweptAgo': 'Host 已在{when}自动清理 {count} 条过期条目。',
         'time.justNow': '刚刚',
@@ -1121,6 +1123,11 @@ window.__ModuleLoader__.load({
       // Only `trashed` rows are ever swept, so a restored or mid-transaction row
       // must not advertise a deadline it will never reach.
       if (entry.status !== undefined && entry.status !== 'trashed') return { days, daysLeft: null }
+      // An entry filed by the archiving listener is never swept: the Host
+      // withholds `daysLeft` for it (`hold: 'auto-archive'`) because the Host's
+      // archive contract keeps the log. Rendering a countdown here would be a
+      // promise the janitor has already decided not to keep.
+      if (entry.hold === 'auto-archive') return { days, daysLeft: null, hold: 'auto-archive' }
       const hostDays = entry.daysLeft === null || entry.daysLeft === undefined ? Number.NaN : Number(entry.daysLeft)
       if (Number.isFinite(hostDays) && hostDays >= 0) return { days, daysLeft: hostDays }
       const deletedAt = Number(entry.deletedAt)
@@ -2158,7 +2165,9 @@ window.__ModuleLoader__.load({
       // overwrote the first one's success flash.
       const trashActionBusy = restoreBusyId !== null || purgeBusy === true || discardBusyId !== null
       const expiryHint = (entry) => {
-        const left = retentionInfo(state, entry).daysLeft
+        const info = retentionInfo(state, entry)
+        if (info.hold === 'auto-archive') return ` · ${t('trash.autoHold')}`
+        const left = info.daysLeft
         if (left === null) return ''
         return ` · ${left === 0 ? t('trash.expiresSoon') : t('trash.expiresIn', { days: left })}`
       }
@@ -2516,6 +2525,53 @@ window.__ModuleLoader__.load({
      * Plugin entry
      * ------------------------------------------------------------------ */
 
+    /**
+     * Slot mounts that never happen are invisible. `slots.inject` waits for a
+     * slot nobody declared, and a throwing callback is rethrown out of band and
+     * permanently retires that injection — either way the user sees a menu entry
+     * that is simply missing, with nothing in the log. Track each mount and say
+     * something once, instead of failing silently.
+     */
+    const slotState = {}
+    function mountSlot(slots, name, register) {
+      slotState[name] = 'pending'
+      const timer = setTimeout(function () {
+        if (slotState[name] === 'pending') {
+          slotState[name] = 'waiting'
+          console.warn('[' + NS + '] slot "' + name + '" has not been contributed; the entry is not rendered')
+        }
+      }, 5000)
+      if (typeof timer.unref === 'function') timer.unref()
+      let off = null
+      try {
+        off = slots.inject(name, function () {
+          try {
+            const dispose = register()
+            slotState[name] = 'mounted'
+            clearTimeout(timer)
+            return dispose
+          } catch (error) {
+            // A throw here is permanent: the Host retires the injection, so the
+            // entry never appears again in this session.
+            slotState[name] = 'failed'
+            clearTimeout(timer)
+            console.warn('[' + NS + '] slot "' + name + '" registration failed:', error)
+            return function () {}
+          }
+        })
+      } catch (error) {
+        slotState[name] = 'failed'
+        clearTimeout(timer)
+        console.warn('[' + NS + '] slot "' + name + '" could not be injected:', error)
+      }
+      return function () {
+        clearTimeout(timer)
+        if (typeof off === 'function') {
+          try { off() } catch (error) { console.warn('[' + NS + '] slot "' + name + '" cleanup failed:', error) }
+        }
+      }
+    }
+
     function apply(ctx) {
       runtimeCtx = ctx
       const slots = ctx.slots ?? (typeof ctx.get === 'function' ? ctx.get('slots') : undefined)
@@ -2551,26 +2607,26 @@ window.__ModuleLoader__.load({
 
       // The dialog lives in the overlay, not inside the menu item: the menu
       // item unmounts with its dropdown, which would take the dialog with it.
-      ctx.effect(() => slots.inject('shell.overlay', () => slots.register({
+      ctx.effect(() => mountSlot(slots, 'shell.overlay', () => slots.register({
         name: 'shell.overlay',
         id: 'conversation-recycle-bin-dialog',
         order: 50,
       }, () => h(DialogHost))))
 
-      ctx.effect(() => slots.inject('sidebar.workspaces.session.menu.item', () => slots.register({
+      ctx.effect(() => mountSlot(slots, 'sidebar.workspaces.session.menu.item', () => slots.register({
         name: 'sidebar.workspaces.session.menu.item',
         id: 'conversation-recycle-bin',
         order: 500,
       }, (props) => h(DeleteMenuRow, props))))
 
-      ctx.effect(() => slots.inject('conversation.session.header.actions', () => slots.register({
+      ctx.effect(() => mountSlot(slots, 'conversation.session.header.actions', () => slots.register({
         name: 'conversation.session.header.actions',
         id: 'conversation-recycle-bin',
         order: 100,
       }, (props) => h(HeaderDeleteAction, props))))
 
       const hasLocaleService = peekLocaleService() !== null
-      ctx.effect(() => slots.inject('settings.section', () => slots.register({
+      ctx.effect(() => mountSlot(slots, 'settings.section', () => slots.register({
         name: 'settings.section',
         id: 'conversation-recycle-bin',
         order: 1300,
@@ -2610,6 +2666,9 @@ window.__ModuleLoader__.load({
     // the harness cannot render: this is the piece that decides whether the user
     // is told at all, so it must be assertable against a real Host payload.
     exports.__retentionInfo = retentionInfo
+    // Observable mount state (pending / waiting / mounted / failed), for tests and
+    // for anyone debugging "the menu entry is missing".
+    exports.__slotState = () => ({ ...slotState })
     exports.__adapterLabel = adapterLabel
     exports.__adapterReason = adapterReason
     exports.__loadUiFlags = loadUiFlags

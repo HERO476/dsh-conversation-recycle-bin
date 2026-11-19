@@ -677,3 +677,51 @@ test('json index: a writer that restores the deleted nodes turns the deletion in
     await store.cleanup()
   }
 })
+
+test("json index: a write that drops another writer's node fails instead of claiming success", async () => {
+  // The opposite direction from the test above, and the one 0.3.25 could not
+  // see: this adapter replaces the WHOLE file. If md_cg appends a node between
+  // our read and our rename, our write carries the OLD snapshot and that node
+  // is gone — while the "deleted nodes are absent" check still passes, because
+  // the nodes WE removed really are absent.
+  const store = await makeStore()
+  const root = join(process.cwd(), 'test', '.tmp', `md-clobber-${Date.now()}`)
+  const trashDir = join(root, 'trash', 'entry-1')
+  try {
+    const original = await readFile(join(store.root, '_index.json'), 'utf8')
+    // Our own targets (n1,n2,n5 for SESSION_1, n4 is protected) are gone — the
+    // deletion itself landed — but n6 belongs to another session and is lost.
+    const clobbered = JSON.parse(original)
+    for (const gone of ['n1', 'n2', 'n5', 'n6']) delete clobbered.nodes[gone]
+    const realFs = await import('node:fs/promises')
+    let done = false
+    const fsApi = {
+      ...realFs,
+      async rename(from, to) {
+        const result = await realFs.rename(from, to)
+        if (!done && String(to).endsWith('_index.json')) {
+          done = true
+          await realFs.writeFile(to, JSON.stringify(clobbered), 'utf8')
+        }
+        return result
+      },
+    }
+    const adapter = createJsonIndexMemoryAdapter({
+      id: 'probe',
+      label: 'probe',
+      indexFile: join(store.root, '_index.json'),
+      rootDir: store.root,
+      sessionField: 'session',
+      nodesPointer: '/nodes',
+      fsApi,
+    })
+    await assert.rejects(
+      adapter.exportSession(SESSION_1, trashDir),
+      (error) => error.code === 'E_MEMORY_CONFLICT' && /dropped/.test(error.message),
+    )
+    assert.equal(done, true)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 60 }).catch(() => {})
+    await store.cleanup()
+  }
+})

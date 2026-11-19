@@ -1,0 +1,25 @@
+{
+  "hostVersion": "0.2.2-rc.5",
+  "assertions": [
+    "host package.json is readable",
+    "plugin engines.dsh admits the installed host",
+    "webServer still supports kind \"prefix\"",
+    "webServer handler keeps the (req, res) signature",
+    "client module system keeps __ModuleLoader__.load",
+    "client resource stays <id>/client.js",
+    "slot sidebar.workspaces.session.menu.item is still contributed",
+    "slot conversation.session.header.actions is still contributed",
+    "slot shell.overlay is still contributed",
+    "slot settings.section is still contributed",
+    "client bundle registers under the package name",
+    "dsh-workspace still publishes workspace/session-archived",
+    "dsh-workspace still publishes workspace/session-unarchiving",
+    "host project keys stay bounded at 251 chars",
+    "host escapes unsafe code units as ~XXXX",
+    "host still ships the projection cache the checkpoint shape belongs to",
+    "plugin projectKey reproduces the golden vector",
+    "plugin session segment passes a plain id through",
+    "plugin session segment escapes a separator",
+    "plugin projection version matches the Host checkpoint spec"
+  ]
+}
