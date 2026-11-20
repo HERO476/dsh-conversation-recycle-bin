@@ -191,6 +191,24 @@ memory  →  messages  →  session/catalog
 
 `manifest.status` 只允许 `pending → trashed → restoring/restored / purging`。`GET /trash` 把**所有**条目都返回：`trashed` 进 `entries`（回收站 UI，可恢复/彻底删除），其余状态进 `incomplete`（设置页单独列出，提供「恢复」与「discard」两个出口，不再出现"失败了却没有任何清理入口"的死条目）。恢复顺序是删除的逆序：日志 → catalog → 记忆。
 
+### 4.4.1 两条载体的围栏差异（桌面壳 vs 网页）
+
+同一个 Host 进程可以同时被桌面壳和浏览器访问：桌面壳把 `dsh-app://app` 的请求转发到 loopback，浏览器也可能直接打开同一个 URL。所以**围栏强度取决于载体**，不是同一套。
+
+| 载体 | 私有 header | Origin 校验 | `connection` 层 |
+|---|---|---|---|
+| 网页（浏览器直连） | client 发送 | 生效（`requireSameOrigin`） | 生效 |
+| 桌面壳（`dsh-app://app` → 转发） | client 发送，转发器原样透传 | **不生效**：转发器删掉 `origin` 与 `sec-fetch-site`，再注入宿主 cookie | 生效 |
+
+结论：桌面端的真实围栏是「loopback Host + 私有 header + 宿主 cookie」。`requireSameOrigin` 与 `dsh-app://app` 白名单在桌面侧不可达，属防御性死代码。
+
+两条必须写明的边界：
+
+1. **私有 header 是 CSRF 围栏，不是认证。** 它是固定字面量，本机任何进程猜得到。把 `requireConnection` 设为 `false` 之后，本机任意进程可以走完 preview → delete → purge；这个组合只适合「本机没有其他用户」的部署。
+2. **`requireOwnerPeer` 在 DSH 0.2.2-rc.5 上无法区分第二个人。** 宿主的 `connection.admit()` 只会产出 `{ principal: { kind: 'owner' } }`，所以拿着浏览器 cookie 的第二个人在插件眼里就是 owner。反代部署必须让 `trustProxiedDeployment` 保持 `false`（默认）：此时宿主若报告 `allowsRemoteAuthorities`，破坏性路由直接 403，而不是继续宣称一个做不到的隔离。
+
+审计归属：`audit.source` 现在按请求区分 `desktop-ui` / `web-ui`（client 发送 `x-conversation-recycle-bin-surface`），缺失或未知时退回进程级判断。
+
 ### 4.5 归档 → 回收站（`autoArchive`，自动条目需手动彻底删除）
 
 把一个被**归档**的会话自动登记进回收站。**关联记忆永不被这条路径触碰**（入口硬编码 `includeMemory:false`，且 `performPurge` 对该来源的条目有 `E_MEMORY_GUARD` 兜底）。

@@ -3,6 +3,45 @@
 All notable changes to `dsh-conversation-recycle-bin` are documented here.
 The format follows Keep a Changelog; the project uses Semantic Versioning.
 
+## [0.3.27] — 2026-11-20
+
+桌面端 + 网页端审计（架构 / AppSec / 验收 三方独立评审）的落地。评审的结论是**功能面没找到跑不通的 bug，拦住发布的是验收链失效与两条声明不实**：宣称能验桌面宿主的两级门禁，一个在默认调用下指向了错的宿主（CLI 的 0.2.2-alpha.2），一个未认证就 exit 0。
+
+### Fixed — 验收链（这两条是本次的发布阻断项）
+
+- **`check:host-api` 默认解析读错了宿主**（`scripts/verify-host-api.mjs`）：候选只找 `resources/app.asar`，而本机该文件已被第三方工具改名成 `app.asar.dshpurge-disabled`，于是回落到 `~/.dsh/profiles/node_modules/@deepseek-ai/dsh`（CLI `0.2.2-alpha.2`），输出 9 条假漂移、exit 1；同时 `openDirectory` 的包前缀硬编码成 asar 布局的 `dsh/node_modules/...`，目录模式下必然「package missing」。现在候选顺序是 `resources/app`（解包树，Electron 实际运行的那棵）→ `app.asar` → `app.asar.dshpurge-disabled`，包前缀按实际布局探测，命中行会打印选中宿主与版本。默认调用从 9 条 FAIL 变为 **20/20 PASS**。
+- **`check:host-runtime` 未认证即 exit 0**：7 条检查只跑了「已挂载」1 条，而 `ci.yml` 里根本没有这一步。现在该结果 exit **3（MOUNTED-BUT-UNVERIFIED）** 并逐条列出没跑的 6 项；确实只关心挂载时显式传 `--mounted-only` 才返回 0；CI 新增该步，用 `--allow-unreachable` 在无宿主 runner 上打印 SKIP 清单而不是假装通过。
+- **快照比对是死代码**：它写在 `host === null` 的 `return 0` 之后，CI 永远走不到。现在三向校验（`missing` / `declared but never ran` / `stale`），无宿主时用脚本内的固定断言清单比对，删断言必然变红。
+
+### Fixed — 声明与实现不符
+
+- **`/trash` 回传原始 fs 错误**：失败条目的 `error.cause` 带着 `EPERM: … rename 'D:\…\session.jsonl' -> 'D:\…\trash\x\session'` 两条绝对路径与账号名，而客户端只渲染 `error.message`（且只对 `unreadable` 行）——零产品价值、纯泄漏。现在白名单成 `{failedStep, rolledBack}`。
+- **`/sessions` 与 `/preview` 回传绝对 `cwd`**：两者都与 `/state`、`/audit` 的「宿主路径不出网」自相矛盾，`cwd` 本来就在脱敏器的 `PATH_KEYS` 里，只是这两条路由没走它。现在保留字段（选择器用它当副标题）但收敛成最后一段。
+- **脱敏器在空格处截断**：`C:\Program Files\DeepSeek Harness\…` 被截成 `Program Files\…`（去头，尾巴全露）。路径规则改为允许内部空格，并用 `trimToLastSegment` 把贪婪匹配吞进去的散文还回去。
+- **`requireOwnerPeer` 覆盖了读路由**：与 schema 的「destructive routes」不符，非 owner 连 `/state` 都 403，把降权变成空白面板。现在门禁只作用于 `/delete`、`/trash/restore|purge|discard`；`POST /preview` 是读，不拦。
+- **`requireOwnerPeer` 在 rc.5 上是结构性无效门禁**：宿主 `connection.admit()` 只会产出 `{ principal: { kind: 'owner' } }`（`dsh-typert-protocol` 的 `PrincipalMap` 只有 `owner`），所以拿浏览器 cookie 的第二个人在插件眼里就是 owner。新增 `trustProxiedDeployment`（默认 false）：宿主报告 `allowsRemoteAuthorities` 时破坏性路由直接 403，而不是继续宣称做不到的隔离。schema、`cordis.patch.yml`、README §4.4.1 同步改写。
+- **`/trash/purge`、`/trash/discard` 只有常量短语**：无单次令牌、不占限流，清空回收站等于 N 次免额请求。新增 `POST /trash/confirm` 发放绑定 `(trashId, action)` 的单次令牌（TTL 同 `confirmTokenTtlMs`），purge/discard 必须携带并计入 `maxDeletesPerMinute`。
+- **auto-archive「30 天自动清理」文案与实现相反**（0.3.25 起自动条目永不随保留期清理）：`cordis.patch.yml`、`lib/core/auto-archive.js` 改写，0.3.24 的 CHANGELOG 段加取代注记。
+
+### Fixed — 两端一致性与可观测性
+
+- **`audit.source` 是进程常量**：桌面壳与浏览器访问同一个 Host 时都记 `desktop-ui`，「谁删的」不可答。client 现在发送 `x-conversation-recycle-bin-surface`，Host 按请求判定，缺失时退回进程级判断。
+- **`activeRouteDispose` 是模块级单例**：模块被求值两次（双 fiber / 双配置根 / ESM 缓存未命中）时各自持有 `null`，第二份 `register` 会因重复路径抛错并连带杀掉归档钩子与保留期定时器。守卫挪到 `globalThis` 的进程级槽位。
+- **`/state.retention.deferred` 无消费者**：回收站页现在按它渲染一条解释（自动归档条目为何还在），否则文案承诺「N 天后清理」而列表持续增长。
+- **桌面更新锁的 503 被解释成「插件被禁用」**：更新安装期间 `connection/request` 回 503 无正文，现在文案包含「或正在安装桌面更新」。
+
+### Added
+
+- `test/crash-recovery.test.mjs`：**真实跨进程**锁语义——持锁子进程被 `SIGKILL` 后死 pid 立刻可破；活着的持锁者不被年龄破锁。此前所有「跨进程锁」用例都是同进程写字模拟。
+- 六条审计回归用例（`test/api.test.mjs` 末尾）：`admit()` rejection 透传 401/403（此前整段删掉 269 用例仍全绿）、四条读路由的私有 header 门禁、失败条目的 `cause` 不出网、`cwd` 不含绝对路径、purge 令牌必须单次且绑定条目、discard 令牌不能 purge。每条都用变异验证过会红。
+- `README §4.4.1`：桌面壳与网页的围栏差异表（转发器删 `origin`/`sec-fetch-site` → 桌面侧 `requireSameOrigin` 不可达），以及「私有 header 是 CSRF 围栏不是认证」、owner-only 在 rc.5 的真实边界。
+
+### Not verified in this release
+
+**桌面真机 E2E 仍未执行**：预览→删除→回收站→恢复→彻底删除、三处 UI 入口可见性、两个 Host 共用 `DSH_HOME` 的并发删除、kill 中断 purge 的恢复（`test/crash-recovery.test.mjs` 只覆盖锁语义，不是 purge 事务本身）、低磁盘/杀软占用。补这些需要 2717 的会话凭据（`--cookie` / `--launch`）与一只隔离的 `DSH_HOME`。
+
+环境事实更正：本机 `resources/app.asar` **不存在**，实际运行的是解包树 `resources/app`（`app.asar.dshpurge-disabled` 209,083,008 B）；`dsh-purge` 1.7.20 于 2026-11-20T12:50:39Z 重新 apply 过，`main.js` 相对 `.dshpurge.bak` 有 5 个 hunk（+19/−6，含关闭 host 崩溃上报与接管 win32 更新交接）。0.3.26 里「宿主 asar 是 stock rc.5、reapply-failed 目录存在」的注记与磁盘现状不符——该目录已不存在。
+
 ## [0.3.26] — 2026-11-19
 
 宿主升到 **0.2.2-rc.5**（`dshBuildCommit 3f85d88`），三方复审判定：**rc.3→rc.5 没有与插件相关的破坏性变更**，授权主链完好（`requireOwnerPeer` 在 rc.5 的真实 `PeerAdmission` 上实测 200）、插件在 3080 上真实挂载（`GET /api/state` 返回插件自有 JSON 信封）。
@@ -75,6 +114,8 @@ The format follows Keep a Changelog; the project uses Semantic Versioning.
 
 评审无法执行的部分仍然是计划而非结论：桌面端与网页端的真机 E2E（预览→删除→回收站→恢复→彻底删除，需 launch URL 或 cookie）、两个 Host 共用一个 `DSH_HOME` 的并发删除、kill 进程中断 purge 后的恢复、低磁盘/杀软占用。本机宿主树还被第三方工具动过（`app.asar.rename-pending` + 一份 `phase:"failed"` 的 purge handoff），建议在干净安装上复验一次。
 ## [0.3.24] — 2026-11-14
+
+> **本节的「30 天自动清理」表述已被 0.3.25 取代。** 自动归档条目现在永远不会被保留期清理（sweepExpiredTrash() 一律 deferred），只能由用户在回收站手动彻底删除；trashRetentionDays 只作用于用户自己删的条目。本节保留原文以记录当时的发布内容，行为以实现与 README 为准。
 
 新功能：**归档 → 回收站**。被归档的会话自动登记进回收站，再由既有保留期清扫在 `trashRetentionDays`（默认 30）天后彻底删除，**关联记忆永不被这条路径触碰**。设置页可关闭，默认在升级后一次性询问。
 

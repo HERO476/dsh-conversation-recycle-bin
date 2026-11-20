@@ -28,13 +28,21 @@
         # every key the contract has.
         requireConnection: true
         allowNonLoopback: false
-        # Owner-only mode. `requestRejection` answers authenticated-or-not only;
-        # a Host that authenticates non-owner peers (remote-access grants) would
-        # otherwise let them delete conversations once this route is exposed
-        # through a proxy. When true the plugin asks the connection layer for the
-        # principal and refuses anything that is not the owner — including an
-        # unknown principal (fail-closed). Keep false on loopback-only setups.
+        # Owner-only mode for DESTRUCTIVE routes only (/delete, /trash/restore,
+        # /trash/purge, /trash/discard). Reads and POST /preview stay available:
+        # refusing them turned a downgrade into a blank panel. When true the
+        # plugin asks the connection layer for the principal and refuses anything
+        # that is not the owner — including an unknown principal (fail-closed).
+        # HONEST LIMIT on 0.2.2-rc.5: `connection.admit()` can only ever produce
+        # an OWNER principal, so this switch cannot separate a second person with
+        # the browser cookie from the owner. Keep trustProxiedDeployment false on
+        # any deployment that accepts remote authorities.
         requireOwnerPeer: false
+        # Set true only after deciding that every peer your proxy authenticates
+        # IS the owner. With the default false, a Host whose connection layer
+        # reports `allowsRemoteAuthorities` refuses destructive routes outright
+        # instead of advertising an isolation rc.5 cannot enforce.
+        trustProxiedDeployment: false
         # Reverse-proxy deployments: list the exact authorities the proxy puts
         # in `Host` (host, host:port). A bare host admits any port. Listing them
         # is narrower than turning allowNonLoopback on for every hostname.
@@ -84,9 +92,12 @@
           # plugin trash (recoverable) or leave them untouched?
           deleteMode: trash
         # Archive → recycle bin. An archived conversation automatically becomes a
-        # recycle-bin entry, which the retention sweep above purges after
-        # `trashRetentionDays` days. Those entries NEVER touch conversation
-        # memory, whatever `memory.deleteMode` says.
+        # recycle-bin entry. It is NOT purged by the retention sweep above,
+        # whatever `trashRetentionDays` says: the Host's archive contract is
+        # "hide the conversation, keep the log", so an automatic entry leaves only
+        # by a manual, confirmed purge. `trashRetentionDays` governs USER
+        # deletions. Those entries NEVER touch conversation memory, whatever
+        # `memory.deleteMode` says.
         #
         # `enabled` is both the operator veto and the pre-selected answer in the
         # one-time prompt shown after an upgrade: the effective behaviour is

@@ -118,6 +118,7 @@ window.__ModuleLoader__.load({
         'trash.autoHold': 'kept until you delete it (archiving never expires)',
         'trash.swept': 'The Host cleaned up {count} expired entries in the background.',
         'trash.sweptAgo': 'The Host cleaned up {count} expired entries {when}.',
+        'trash.deferred': '{count} auto-archived entries are held back from the retention sweep: archiving hides a conversation but keeps its log, so only a manual purge removes them.',
         'time.justNow': 'just now',
         'time.minutesAgo': '{count} min ago',
         'time.hoursAgo': '{count} h ago',
@@ -315,6 +316,7 @@ window.__ModuleLoader__.load({
         'trash.autoHold': '保留到你手动删除（归档条目不会自动过期）',
         'trash.swept': 'Host 已在后台自动清理 {count} 条过期条目。',
         'trash.sweptAgo': 'Host 已在{when}自动清理 {count} 条过期条目。',
+        'trash.deferred': '{count} 条自动归档条目不会被保留期清理：归档只是隐藏会话、保留日志，只能由你手动彻底删除。',
         'time.justNow': '刚刚',
         'time.minutesAgo': '{count} 分钟前',
         'time.hoursAgo': '{count} 小时前',
@@ -659,9 +661,30 @@ window.__ModuleLoader__.load({
       if (status === 503) {
         return new ApiError('E_DISABLED', guarded
           ? 'The Host route guard has no connection service yet; retry once the app has finished starting.'
-          : 'The plugin is disabled, or the Host is not ready yet.', { status })
+          // A desktop update holds `connection/request` and answers 503 with no
+          // body, which used to be reported as "the plugin is disabled" — the one
+          // explanation that sends the user hunting for a setting that is fine.
+          : 'The plugin is disabled, the Host is not ready yet, or a desktop update is installing. Retry in a moment; if the panel stays empty, check the plugin switch.', { status })
       }
       return new ApiError('E_BAD_RESPONSE', `The Host answered ${Number.isFinite(status) ? status : 'an unexpected status'} without a JSON body.`, { status })
+    }
+
+    /**
+     * Which carrier is asking.
+     *
+     * The Host process cannot tell: the desktop shell forwards `dsh-app://app`
+     * to the same loopback server a browser tab uses, so `process.versions
+     * .electron` labelled both `desktop-ui` and "who deleted this?" became
+     * unanswerable. The Host reads this header for the audit `source` and falls
+     * back to its own answer when it is absent.
+     */
+    function surfaceName() {
+      try {
+        if (typeof document !== 'undefined' && String(document.baseURI ?? '').startsWith('dsh-app:')) return 'desktop'
+      } catch {
+        // A document whose baseURI cannot be read is a browser.
+      }
+      return 'web'
     }
 
     async function api(path, options = {}) {
@@ -671,7 +694,7 @@ window.__ModuleLoader__.load({
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
         const url = apiUrl(path)
-        const headers = { 'x-conversation-recycle-bin': '1' }
+        const headers = { 'x-conversation-recycle-bin': '1', 'x-conversation-recycle-bin-surface': surfaceName() }
         if (options.body !== undefined) headers['content-type'] = 'application/json'
         const response = await fetch(url, {
           method,
@@ -2091,15 +2114,38 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * A single-use token for one permanent trash action.
+       *
+       * Purge and discard used to be plain requests carrying only the word
+       * DELETE, so emptying the bin was N cheap calls that never touched the
+       * delete budget. The Host now binds a token to (trashId, action); ask for
+       * it immediately before acting, because it expires like a delete
+       * confirmation.
+       */
+      async function trashConfirmationToken(trashId, action) {
+        const result = await api('/trash/confirm', {
+          method: 'POST',
+          body: { trashId, action },
+          timeoutMs: trashTimeoutMs(),
+        })
+        const token = result?.confirmation?.token
+        if (typeof token !== 'string' || token === '') {
+          throw new ApiError('E_CONFIRM_REQUIRED', 'The Host did not issue a trash confirmation.')
+        }
+        return token
+      }
+
       async function purge(trashId, phrase) {
         if (purgeBusy === true) return
         setPurgeBusy(true)
         setError(null)
         const entry = trash.find((item) => item.trashId === trashId)
         try {
+          const confirmToken = await trashConfirmationToken(trashId, 'purge')
           await api('/trash/purge', {
             method: 'POST',
-            body: { trashId, confirmPhrase: phrase },
+            body: { trashId, confirmPhrase: phrase, confirmToken },
             timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.purged'))
@@ -2125,9 +2171,10 @@ window.__ModuleLoader__.load({
         setDiscardBusyId(trashId)
         setError(null)
         try {
+          const confirmToken = await trashConfirmationToken(trashId, 'discard')
           await api('/trash/discard', {
             method: 'POST',
-            body: { trashId, confirmPhrase: phrase, force: force === true },
+            body: { trashId, confirmPhrase: phrase, force: force === true, confirmToken },
             timeoutMs: trashTimeoutMs(),
           })
           flashStore.show(t('trash.discarded'))
@@ -2297,6 +2344,12 @@ window.__ModuleLoader__.load({
 
         tab === 'trash' ? h('div', { id: 'dc-panel-trash', role: 'tabpanel', 'aria-labelledby': 'dc-tab-trash', className: 'dc-panel' },
           retentionDays > 0 ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.retention', { days: retentionDays })) : null,
+          // `/state.retention.deferred` counts the entries the sweep deliberately
+          // skips. Without this line the bin grows while the copy above promises
+          // "purged after N days", with no way for the user to see why.
+          Number(state?.retention?.deferred) > 0
+            ? h('div', { className: 'dc-hint dc-hint-block' }, t('trash.deferred', { count: Number(state.retention.deferred) }))
+            : null,
           Number(lastSweep?.purged) > 0
             ? h('div', { className: 'dc-hint dc-hint-block' }, typeof lastSweep?.at === 'number'
               ? t('trash.sweptAgo', { count: Number(lastSweep.purged), when: formatAgo(lastSweep.at) })
@@ -2625,15 +2678,21 @@ window.__ModuleLoader__.load({
         order: 100,
       }, (props) => h(HeaderDeleteAction, props))))
 
-      const hasLocaleService = peekLocaleService() !== null
-      ctx.effect(() => mountSlot(slots, 'settings.section', () => slots.register({
-        name: 'settings.section',
-        id: 'conversation-recycle-bin',
-        order: 1300,
-        // A thunk label is re-read on locale switches, but pre-locale shells
-        // render the label string directly and would crash on a function.
-        label: hasLocaleService ? () => t('section.label') : t('section.label'),
-      }, () => h(SettingsSection))))
+      ctx.effect(() => {
+        // Decide at MOUNT time, not at apply time: `locale` can arrive between
+        // the two, and the label must be a thunk (re-read on locale switches)
+        // only on a shell that can render one — a pre-locale shell renders the
+        // label string directly and would crash on a function. Reading the
+        // service here still precedes the first render, but it no longer freezes
+        // an answer taken before the slot service even existed.
+        const hasLocaleService = peekLocaleService() !== null
+        return mountSlot(slots, 'settings.section', () => slots.register({
+          name: 'settings.section',
+          id: 'conversation-recycle-bin',
+          order: 1300,
+          label: hasLocaleService ? () => t('section.label') : t('section.label'),
+        }, () => h(SettingsSection)))
+      })
     }
 
     exports.name = 'conversation-recycle-bin'

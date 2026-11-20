@@ -180,6 +180,22 @@ function call(api, path, { method = 'POST', body = null, headers = {}, abortBody
   })
 }
 
+/**
+ * A single-use token for one permanent trash action.
+ *
+ * `/trash/purge` and `/trash/discard` require one now, bound to (trashId, action)
+ * and counted against the delete budget: a constant word DELETE made emptying
+ * the bin a stream of cheap, unthrottled requests. Tests ask for it here so each
+ * one stays about the action instead of the ceremony.
+ */
+async function trashToken(api, trashId, action) {
+  const result = await call(api, '/trash/confirm', { body: { trashId, action } })
+  assert.equal(result.status, 200, `trash confirmation failed: ${result.raw}`)
+  const token = result.body?.confirmation?.token
+  assert.equal(typeof token, 'string')
+  return token
+}
+
 test('preview: counts messages + associated memory and issues a single-use token', async () => {
   const fixture = await makeFixture()
   try {
@@ -636,11 +652,11 @@ test('trash: an entry that never committed is listed and can be discarded', asyn
     assert.equal(trash.body.incomplete[0].capabilities.canDiscard, true)
     const trashId = trash.body.incomplete[0].trashId
 
-    const wrongPhrase = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'no' } })
+    const wrongPhrase = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: 'no' } })
     assert.equal(wrongPhrase.status, 400)
     assert.equal(wrongPhrase.body.error.code, 'E_CONFIRM_PHRASE')
 
-    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'DELETE' } })
+    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(discarded.status, 200)
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
     const after = await call(fixture.api, '/trash', { method: 'GET' })
@@ -678,7 +694,7 @@ test('trash: a failed delete that had moved memory is cleanable once the put-bac
     // discard refused it forever while restore/purge refused its status.
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId, 'memory', 'lingshu', 'bundle.json')), false)
 
-    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'DELETE' } })
+    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(discarded.status, 200)
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
   } finally {
@@ -1122,7 +1138,7 @@ test('trash: a corrupt manifest is surfaced as unreadable and discardable once e
     assert.ok(row !== undefined)
     assert.equal(row.status, 'unreadable')
 
-    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId: corruptId, confirmPhrase: 'DELETE' } })
+    const discarded = await call(fixture.api, '/trash/discard', { body: { trashId: corruptId, confirmToken: await trashToken(fixture.api, corruptId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(discarded.status, 200)
     assert.equal(await pathExists(corruptDir), false)
 
@@ -1134,7 +1150,7 @@ test('trash: a corrupt manifest is surfaced as unreadable and discardable once e
     await mkdir(join(heldDir, 'session'), { recursive: true })
     await writeFile(join(heldDir, 'session', 'session.jsonl.zstd'), Buffer.alloc(8, 7), 'utf8')
     await writeFile(join(heldDir, 'manifest.json'), 'junk', 'utf8')
-    const discardedLog = await call(fixture.api, '/trash/discard', { body: { trashId: heldId, confirmPhrase: 'DELETE' } })
+    const discardedLog = await call(fixture.api, '/trash/discard', { body: { trashId: heldId, confirmToken: await trashToken(fixture.api, heldId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(discardedLog.status, 200)
     assert.equal(await pathExists(heldDir), false)
 
@@ -1145,7 +1161,7 @@ test('trash: a corrupt manifest is surfaced as unreadable and discardable once e
     await mkdir(join(memoryDir, 'memory', 'codex'), { recursive: true })
     await writeFile(join(memoryDir, 'memory', 'codex', 'bundle.json'), '{"count":1,"entries":[]}', 'utf8')
     await writeFile(join(memoryDir, 'manifest.json'), 'junk', 'utf8')
-    const refused = await call(fixture.api, '/trash/discard', { body: { trashId: memoryId, confirmPhrase: 'DELETE' } })
+    const refused = await call(fixture.api, '/trash/discard', { body: { trashId: memoryId, confirmToken: await trashToken(fixture.api, memoryId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(refused.status, 409)
     assert.equal(refused.body.error.code, 'E_TRASH_CONFLICT')
     assert.equal(await pathExists(memoryDir), true)
@@ -1279,7 +1295,7 @@ test('trash mutations ask the file lock for the long batch budget, not the gener
     // purge
     const purgeId = await deleteOne(S2, 'hard')
     waits.length = 0
-    const purge = await call(fixture.api, '/trash/purge', { body: { trashId: purgeId, confirmPhrase: 'DELETE' } })
+    const purge = await call(fixture.api, '/trash/purge', { body: { trashId: purgeId, confirmToken: await trashToken(fixture.api, purgeId, 'purge'), confirmPhrase: 'DELETE' } })
     assert.equal(purge.status, 200)
     assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
 
@@ -1310,7 +1326,7 @@ test('trash mutations ask the file lock for the long batch budget, not the gener
       error: null,
     }, null, 2), 'utf8')
     waits.length = 0
-    const discard = await call(fixture.api, '/trash/discard', { body: { trashId: pendingId, confirmPhrase: 'DELETE' } })
+    const discard = await call(fixture.api, '/trash/discard', { body: { trashId: pendingId, confirmToken: await trashToken(fixture.api, pendingId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(discard.status, 200)
     assert.deepEqual(waits, [TRASH_LOCK_BUDGET_MS])
   } finally {
@@ -1359,8 +1375,14 @@ test('mutation lock: a stale lock that cannot be removed ends in E_LOCK_BUSY, no
 test('trash: a malformed id is a 400 before any path is built', async () => {
   const fixture = await makeFixture()
   try {
-    for (const trashId of ['../../etc', 'a/b', '', 'x'.repeat(200), 'not a valid id']) {
-      const result = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: '' } })
+    // An EMPTY id cannot even be confirmed: that refusal is part of the fence,
+    // so it is asserted on the confirmation route itself.
+    const emptyConfirm = await call(fixture.api, '/trash/confirm', { body: { trashId: '', action: 'discard' } })
+    assert.equal(emptyConfirm.status, 400)
+    assert.equal(emptyConfirm.body.error.code, 'E_BAD_REQUEST')
+
+    for (const trashId of ['../../etc', 'a/b', 'x'.repeat(200), 'not a valid id']) {
+      const result = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: '' } })
       assert.equal(result.status, 400, `expected 400 for ${JSON.stringify(trashId)}`)
       assert.equal(result.body.error.code, 'E_BAD_REQUEST')
     }
@@ -1881,11 +1903,11 @@ test('confirmation: the typed DELETE phrase is matched case-insensitively', asyn
       memory: { adapters: [], total: 0 },
     }), 'utf8')
 
-    const wrong = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'Delete me' } })
+    const wrong = await call(fixture.api, '/trash/purge', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'purge'), confirmPhrase: 'Delete me' } })
     assert.equal(wrong.status, 400)
     assert.equal(wrong.body.error.code, 'E_CONFIRM_PHRASE')
 
-    const accepted = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'delete' } })
+    const accepted = await call(fixture.api, '/trash/purge', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'purge'), confirmPhrase: 'delete' } })
     assert.equal(accepted.status, 200)
     assert.equal(await pathExists(join(fixture.paths.trashDir, trashId)), false)
   } finally {
@@ -1929,7 +1951,7 @@ test('errors: the confirmation, trash and memory failure codes are the ones the 
   fixture = await makeFixture()
   try {
     const missingEntry = await call(fixture.api, '/trash/purge', {
-      body: { trashId: 'zz-abcdef', confirmPhrase: 'DELETE' },
+      body: { trashId: 'zz-abcdef', confirmPhrase: 'DELETE', confirmToken: await trashToken(fixture.api, 'zz-abcdef', 'purge') },
     })
     assert.equal(missingEntry.status, 404)
     assert.equal(missingEntry.body.error.code, 'E_TRASH_NOT_FOUND')
@@ -2175,16 +2197,17 @@ test('desktop shell: the forwarder header set (no Origin) still reaches the rout
     assert.equal(forwarded.status, 200, `unexpected ${forwarded.status}: ${forwarded.raw}`)
     assert.equal(forwarded.body.ok, true)
 
-    // A missing Origin must not be read as "no principal to check". The
-    // owner-only gate is what keeps a remote-access peer out on a proxied
-    // deployment, and losing it here would be invisible in production.
-    pool.principal = { kind: 'remote-grant' }
-    const foreignPeer = await call(fixture.api, '/preview', {
-      body: { sessionIds: [S1] },
+    // A missing Origin must not be read as "no principal to check". The read
+    // routes stay open for an authenticated principal even with the owner gate
+    // on (config.schema.json: the gate covers DESTRUCTIVE routes — refusing
+    // reads turned a downgrade into a blank panel). The gate itself is exercised
+    // on `/delete` in the owner-only tests below.
+    pool.principal = { kind: 'share-viewer' }
+    const readAsForeignPrincipal = await call(fixture.api, '/state', {
+      method: 'GET',
       headers: { origin: undefined, 'sec-fetch-site': undefined, cookie: 'dsh-auth-desktop=token' },
     })
-    assert.equal(foreignPeer.status, 403)
-    assert.equal(foreignPeer.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
+    assert.equal(readAsForeignPrincipal.status, 200)
 
     // And the plugin's own request header is still required on that route:
     // dropping Origin must not turn a cross-process request into a pass.
@@ -2237,11 +2260,11 @@ test('trash: stranded memory files offer, and accept, the forced discard', async
     assert.equal(row.capabilities.strandedMemory, true)
     assert.equal(row.capabilities.canForceDiscard, true)
 
-    const withoutForce = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'DELETE' } })
+    const withoutForce = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: 'DELETE' } })
     assert.equal(withoutForce.status, 409)
     assert.equal(await pathExists(entryDir), true)
 
-    const forced = await call(fixture.api, '/trash/discard', { body: { trashId, confirmPhrase: 'delete', force: true } })
+    const forced = await call(fixture.api, '/trash/discard', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'discard'), confirmPhrase: 'delete', force: true } })
     assert.equal(forced.status, 200)
     assert.equal(await pathExists(entryDir), false)
   } finally {
@@ -2314,26 +2337,77 @@ test('preview: a SUCCESS response never carries the workspace path', async () =>
   }
 })
 
-test('security: requireOwnerPeer refuses a non-owner peer', async () => {
-  const nonOwner = { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'guest' } } }) }
+test('security: requireOwnerPeer refuses a non-owner peer on a destructive route', async () => {
+  // `share-viewer` is the only non-owner principal kind the installed Host
+  // actually declares (dsh-experimental-liveshare viewer-principal.ts). It never
+  // reaches an HTTP route on 0.2.2-rc.5 — which is precisely why the gate cannot
+  // isolate a second holder of the browser cookie: `admit()` only ever yields
+  // `{ kind: 'owner' }`. Claiming otherwise is a contract defect, not a missing
+  // test. This case pins the gate's behaviour on the routes it does guard.
+  const nonOwner = { requestRejection: () => undefined, admit: () => ({ peer: { principal: { kind: 'share-viewer' } } }) }
   const fixture = await makeFixture({ connection: nonOwner, configOverrides: { requireOwnerPeer: true } })
   try {
-    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
-    assert.equal(preview.status, 403)
-    assert.equal(preview.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
+    // Reads stay open: an owner gate that also refuses `/state` shows the user a
+    // blank panel with no explanation instead of a permission error.
+    const state = await call(fixture.api, '/state', { method: 'GET' })
+    assert.equal(state.status, 200)
+    // The destructive route refuses, and it refuses before any token is spent.
+    const deleted = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: 'unspent' },
+    })
+    assert.equal(deleted.status, 403)
+    assert.equal(deleted.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
   } finally {
     await fixture.home.cleanup()
   }
 })
 
-test('security: requireOwnerPeer admits the owner', async () => {
+test('security: requireOwnerPeer admits the owner on a destructive route', async () => {
   const owner = { requestRejection: () => undefined, admit: async () => ({ peer: { principal: { kind: 'owner' } } }) }
   const fixture = await makeFixture({ connection: owner, configOverrides: { requireOwnerPeer: true } })
   try {
-    const result = await call(fixture.api, '/state', { method: 'GET' })
-    assert.equal(result.status, 200)
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const result = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(result.status, 200, `unexpected ${result.status}: ${result.raw}`)
   } finally {
     await fixture.home.cleanup()
+  }
+})
+
+test('security: a Host that accepts remote authorities refuses destructive routes unless trusted', async () => {
+  // On rc.5 `admit()` cannot separate a proxied peer from the owner, so the
+  // plugin must not advertise owner-only isolation on such a Host.
+  const owner = { requestRejection: () => undefined, admit: async () => ({ peer: { principal: { kind: 'owner' } } }), allowsRemoteAuthorities: true }
+  const fixture = await makeFixture({ connection: owner, configOverrides: { requireOwnerPeer: true } })
+  try {
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const refused = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(refused.status, 403)
+    assert.equal(refused.body.error.code, 'E_FORBIDDEN_PRINCIPAL')
+    assert.match(refused.body.error.message, /trustProxiedDeployment/)
+    // Reads are still available, so the panel can explain itself.
+    assert.equal((await call(fixture.api, '/state', { method: 'GET' })).status, 200)
+  } finally {
+    await fixture.home.cleanup()
+  }
+
+  // The operator's explicit opt-in restores the route.
+  const trusted = await makeFixture({
+    connection: { requestRejection: () => undefined, admit: async () => ({ peer: { principal: { kind: 'owner' } } }), allowsRemoteAuthorities: true },
+    configOverrides: { requireOwnerPeer: true, trustProxiedDeployment: true },
+  })
+  try {
+    const preview = await call(trusted.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    const ok = await call(trusted.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    assert.equal(ok.status, 200, `unexpected ${ok.status}: ${ok.raw}`)
+  } finally {
+    await trusted.home.cleanup()
   }
 })
 
@@ -2348,7 +2422,12 @@ test('security: both PeerAdmission shapes report the principal (host contract re
     const connection = { requestRejection: () => undefined, admit: async () => admission }
     const fixture = await makeFixture({ connection, configOverrides: { requireOwnerPeer: true } })
     try {
-      const result = await call(fixture.api, '/state', { method: 'GET' })
+      // Asserted on a destructive route: the gate must admit the owner where it
+      // actually guards, not merely fail to block a read.
+      const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+      const result = await call(fixture.api, '/delete', {
+        body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+      })
       assert.equal(result.status, 200, `unexpected ${result.status} for ${JSON.stringify(admission)}`)
     } finally {
       await fixture.home.cleanup()
@@ -2358,11 +2437,14 @@ test('security: both PeerAdmission shapes report the principal (host contract re
 
 test('security: requireOwnerPeer fails closed when the principal is unknown', async () => {
   // A connection layer that cannot report a principal must refuse: "I cannot
-  // tell who you are" is not permission to delete.
+  // tell who you are" is not permission to delete. The gate is checked on a
+  // destructive route because read routes deliberately stay open.
   const opaque = { requestRejection: () => undefined }
   const fixture = await makeFixture({ connection: opaque, configOverrides: { requireOwnerPeer: true } })
   try {
-    const result = await call(fixture.api, '/state', { method: 'GET' })
+    const result = await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: 'unspent' },
+    })
     assert.equal(result.status, 503)
     assert.equal(result.body.error.code, 'E_PEER_UNKNOWN')
   } finally {
@@ -2826,7 +2908,7 @@ test('auto: an entry holding memory is never purged (E_MEMORY_GUARD)', async () 
     manifest.memory = { adapters: [{ id: 'lingshu', count: 2 }], total: 2, protected: 0, skipped: [] }
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
 
-    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE' } })
+    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'purge'), confirmPhrase: 'DELETE' } })
     assert.equal(purged.status, 409)
     assert.equal(purged.body.error.code, 'E_MEMORY_GUARD')
     // Nothing was removed.
@@ -2961,7 +3043,7 @@ test('auto: turning the switch off stops new entries and retention never purges 
     assert.equal(still.body.entries.length, 1)
     // The user's own purge is the only exit for an automatic entry, and it must
     // still work.
-    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE' } })
+    const purged = await call(fixture.api, '/trash/purge', { body: { trashId, confirmToken: await trashToken(fixture.api, trashId, 'purge'), confirmPhrase: 'DELETE' } })
     assert.equal(purged.status, 200)
   } finally {
     await fixture.home.cleanup()
@@ -3016,6 +3098,160 @@ test('retention: a forward clock jump only advances the high-water mark', async 
     const normal = await fixture.api.__test.sweepExpiredTrash({ force: true })
     assert.equal(normal.clockJump, undefined)
     assert.equal(normal.purged.length, 1)
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+/* ================================================================== *
+ * Regressions from the v0.3.24-v0.3.26 audit
+ *
+ * Every case here corresponds to a defect found by reading the code while
+ * all 269 tests were green. Each must fail if its fix is reverted.
+ * ================================================================== */
+
+test('security: an admit() rejection passes through as 401/403, never 503', async () => {
+  // The session can expire between requestRejection and admit(). Collapsing
+  // that refusal into 'the Host cannot tell who you are' turns a login prompt
+  // into a support ticket. This branch had no coverage at all: deleting it
+  // left the whole suite green.
+  for (const [rejection, status, code] of [[401, 401, 'E_UNAUTHORIZED'], [403, 403, 'E_FORBIDDEN_ORIGIN']]) {
+    const connection = { requestRejection: () => undefined, admit: async () => ({ rejection }) }
+    const fixture = await makeFixture({ connection, configOverrides: { requireOwnerPeer: true } })
+    try {
+      const result = await call(fixture.api, '/delete', {
+        body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: 'unspent' },
+      })
+      assert.equal(result.status, status, 'admit rejection ' + rejection + ' became ' + result.status + ': ' + result.raw)
+      assert.equal(result.body.error.code, code)
+    } finally {
+      await fixture.home.cleanup()
+    }
+  }
+})
+
+test('security: every read route requires the plugin header', async () => {
+  // 0.3.26 added the header check before the GET dispatch; the security test
+  // that claimed to cover it only exercised POST. Deleting the GET check must
+  // fail THIS case, not a transport smoke test that happens to notice.
+  const fixture = await makeFixture({ configOverrides: { requireConnection: false } })
+  try {
+    for (const route of ['/state', '/sessions', '/trash', '/audit']) {
+      const without = await call(fixture.api, route, {
+        method: 'GET',
+        headers: { 'x-conversation-recycle-bin': undefined },
+      })
+      assert.equal(without.status, 403, route + ' without the header -> ' + without.status)
+      assert.equal(without.body.error.code, 'E_FORBIDDEN_ORIGIN')
+      const withHeader = await call(fixture.api, route, { method: 'GET' })
+      assert.equal(withHeader.status, 200, route + ' with the header -> ' + withHeader.status)
+    }
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('privacy: a failed trash entry never ships the raw filesystem cause', async () => {
+  // cascade.js records the original Error.message, which for a rename failure
+  // is EPERM ... rename 'D:\\...\\session.jsonl' -> 'D:\\...\\trash\\x\\session'.
+  // The Client never renders it, so it was pure leakage of two absolute paths.
+  const fixture = await makeFixture()
+  try {
+    fixture.workspaceRegistry.archiveSession = async () => {
+      throw new Error('EPERM: operation not permitted, rename C:\\Users\\someone\\AI\\secret\\session.jsonl -> C:\\Users\\someone\\AppData\\dsh\\trash\\x\\session')
+    }
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.incomplete.length, 1)
+    const failed = trash.body.incomplete[0]
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.error.cause, undefined, 'the raw cause crossed the wire')
+    assert.equal(typeof failed.error.failedStep, 'string')
+    assert.equal(failed.error.rolledBack, true)
+    assert.equal(/[A-Za-z]:[\\/]/.test(JSON.stringify(trash.body)), false, 'an absolute path reached the wire')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('privacy: /sessions and /preview ship a project name, never an absolute cwd', async () => {
+  // Both routes carry cwd as a UI subtitle. Shipping it verbatim contradicted
+  // the redactor's own PATH_KEYS list and 0.3.25's 'Host paths never cross the
+  // wire' note, while /state and /audit were redacted.
+  const fixture = await makeFixture()
+  try {
+    const sessions = await call(fixture.api, '/sessions', { method: 'GET' })
+    assert.equal(sessions.status, 200)
+    assert.ok(sessions.body.sessions.length > 0)
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    assert.equal(preview.status, 200)
+    for (const row of [...sessions.body.sessions, ...preview.body.preview.sessions]) {
+      if (row.cwd === null || row.cwd === undefined) continue
+      assert.equal(/[A-Za-z]:[\\/]/.test(row.cwd) || row.cwd.startsWith('/'), false, 'absolute cwd on the wire: ' + row.cwd)
+    }
+    // Still useful: the picker renders this as a subtitle.
+    assert.ok(sessions.body.sessions.some((row) => typeof row.cwd === 'string' && row.cwd !== ''))
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('trash: a permanent purge needs a single-use token bound to that entry', async () => {
+  // Purge and discard used to accept only the constant word DELETE, so emptying
+  // the bin was N cheap requests that never touched the delete budget.
+  const fixture = await makeFixture()
+  try {
+    // A hard delete leaves an entry that can really be purged; a soft one still
+    // resolves in the Host and the purge refuses with E_SESSION_ALIVE.
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'hard' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'hard', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    assert.equal(trash.body.entries.length, 1)
+    const trashId = trash.body.entries[0].trashId
+
+    const noToken = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE' } })
+    assert.equal(noToken.status, 428, 'a tokenless purge -> ' + noToken.status)
+    assert.equal(noToken.body.error.code, 'E_CONFIRM_REQUIRED')
+
+    const token = await trashToken(fixture.api, trashId, 'purge')
+    const wrongEntry = await call(fixture.api, '/trash/purge', {
+      body: { trashId: 'zz-abcdef', confirmPhrase: 'DELETE', confirmToken: token },
+    })
+    assert.equal(wrongEntry.status, 409)
+    assert.equal(wrongEntry.body.error.code, 'E_CONFIRM_INVALID')
+
+    const ok = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE', confirmToken: token } })
+    assert.equal(ok.status, 200, ok.raw)
+
+    const replay = await call(fixture.api, '/trash/purge', { body: { trashId, confirmPhrase: 'DELETE', confirmToken: token } })
+    assert.equal(replay.status, 409)
+    assert.equal(replay.body.error.code, 'E_CONFIRM_INVALID')
+  } finally {
+    await fixture.home.cleanup()
+  }
+})
+
+test('trash: a discard token cannot purge', async () => {
+  const fixture = await makeFixture()
+  try {
+    fixture.workspaceRegistry.archiveSession = async () => { throw new Error('catalog exploded') }
+    const preview = await call(fixture.api, '/preview', { body: { sessionIds: [S1], includeMemory: false, mode: 'soft' } })
+    await call(fixture.api, '/delete', {
+      body: { sessionIds: [S1], includeMemory: false, mode: 'soft', confirmToken: preview.body.preview.confirmation.token },
+    })
+    const trash = await call(fixture.api, '/trash', { method: 'GET' })
+    const trashId = trash.body.incomplete[0].trashId
+    const discardToken = await trashToken(fixture.api, trashId, 'discard')
+    const wrongAction = await call(fixture.api, '/trash/purge', {
+      body: { trashId, confirmPhrase: 'DELETE', confirmToken: discardToken },
+    })
+    assert.equal(wrongAction.status, 409)
+    assert.equal(wrongAction.body.error.code, 'E_CONFIRM_INVALID')
   } finally {
     await fixture.home.cleanup()
   }

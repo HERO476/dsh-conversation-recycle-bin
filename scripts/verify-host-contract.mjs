@@ -19,6 +19,14 @@
  *                           the 303 it answers with carries the session cookie
  *                           the shell would otherwise inject itself
  *     --token=<token>       session token from a `dsh web` URL
+ *   --mounted-only        treat "mounted but no session" as success. Without it
+ *                         that outcome exits 3, because it is NOT the same as
+ *                         "the runtime contract holds": six of the seven checks
+ *                         below never ran.
+ *   --allow-unreachable   exit 0 (with an explicit SKIP line) when nothing
+ *                         listens on the base URL. For CI runners, which never
+ *                         have a Host: a red build there says nothing, and a
+ *                         silent green says nothing at all.
  *   Environment equivalents: $DSH_COOKIE, $DSH_COOKIE_FILE, $DSH_LAUNCH_URL,
  *   $DSH_TOKEN.
  *
@@ -27,7 +35,8 @@
  *   supported way to prove mount state on that shell instead of skipping the
  *   only check that matters after an upgrade.
  *
- * Exit code: 0 = plugin mounted and answering, 1 = not mounted, 2 = probe error.
+ * Exit code: 0 = every runtime check ran and holds, 1 = not mounted / drift,
+ * 2 = probe error, 3 = mounted but unverified (no session; 6 checks NOT run).
  */
 const args = process.argv.slice(2)
 // `dsh web` prints its own URL with a fresh port (11685 on this machine), and a
@@ -39,14 +48,35 @@ let token = process.env.DSH_TOKEN ?? ''
 let explicitCookie = process.env.DSH_COOKIE ?? ''
 let cookieFile = process.env.DSH_COOKIE_FILE ?? ''
 let launchUrl = process.env.DSH_LAUNCH_URL ?? ''
+/** Opt in explicitly when only mount state matters; otherwise exit 3 says "not verified". */
+let mountedOnly = false
+/** CI runners have no Host at all: skip loudly instead of failing on ECONNREFUSED. */
+let allowUnreachable = false
 for (const arg of args) {
   if (arg.startsWith('--token=')) token = arg.slice('--token='.length)
   else if (arg.startsWith('--cookie=')) explicitCookie = arg.slice('--cookie='.length)
   else if (arg.startsWith('--cookie-file=')) cookieFile = arg.slice('--cookie-file='.length)
   else if (arg.startsWith('--launch=')) launchUrl = arg.slice('--launch='.length)
+  else if (arg === '--mounted-only') mountedOnly = true
+  else if (arg === '--allow-unreachable') allowUnreachable = true
   else if (/^https?:\/\//.test(arg)) base = arg
 }
 base = base.replace(/\/+$/, '')
+
+/**
+ * The seven runtime checks, in order. The first one is provable without a
+ * session; the other six are not. Naming them lets the mount-only outcome say
+ * exactly what it did NOT run instead of reporting a bare exit 0.
+ */
+const RUNTIME_CHECKS = [
+  'plugin prefix is mounted (own error envelope)',
+  'GET /',
+  'package name present in boot data',
+  'control route /dsh-memes-api answers',
+  'GET /conversation-recycle-bin/api/state',
+  'state payload carries the plugin contract (version + limits)',
+  'projection checkpoints are a format this build reads',
+]
 
 const cookies = new Map()
 function rememberCookies(response) {
@@ -158,6 +188,24 @@ async function probeMountEnvelope() {
 }
 
 async function main() {
+  // Nothing listening is a SKIP, not a probe error: a CI runner never has a Host,
+  // and a red build there says nothing about this plugin. Loud either way.
+  let listening = true
+  try {
+    await fetch(`${base}/`, { method: 'GET' })
+  } catch {
+    listening = false
+  }
+  if (listening !== true) {
+    if (allowUnreachable === true) {
+      console.log(`SKIP  nothing is listening on ${base}; ${RUNTIME_CHECKS.length} runtime check(s) were NOT executed.`)
+      for (const name of RUNTIME_CHECKS) console.log(`        - ${name}`)
+      console.log('      Start the desktop app or `dsh web`, then re-run without --allow-unreachable.')
+      return 0
+    }
+    console.log(`FAIL  nothing is listening on ${base}. Start the Host, or pass --allow-unreachable on a runner that has none.`)
+    return 2
+  }
   const credentialProblem = await acquireCredentials()
   if (credentialProblem !== null) {
     console.log(`FAIL  credentials — ${credentialProblem}`)
@@ -182,10 +230,22 @@ async function main() {
         true,
         `401 ${envelopeCode} — the connection fence rejected the probe, the plugin route answered`,
       )
-      console.log('\nResult: MOUNTED. No session was available, but a 404 (unmounted) cannot')
-      console.log('produce this plugin\'s own error envelope. Re-run with --launch/--cookie/--token')
-      console.log('to also exercise the authenticated checks.')
-      return 0
+      console.log('\nResult: MOUNTED-BUT-UNVERIFIED. Mount state is proven, the rest is not.')
+      console.log(`The following ${RUNTIME_CHECKS.length - 1} check(s) did NOT run:`)
+      for (const name of RUNTIME_CHECKS.slice(1)) console.log(`        - ${name}`)
+      console.log('A 404 (unmounted) cannot produce this plugin\'s own error envelope, so the')
+      console.log('prefix is mounted. Everything past it — the boot row, the /state payload shape,')
+      console.log('the projection diagnostics — is UNKNOWN. Re-run with one of:')
+      console.log('        --launch=<launch URL the desktop shell reports>   (desktop)')
+      console.log('        --cookie="dsh-auth-…=…"                          (browser network tab)')
+      console.log('        --cookie-file=<path>                             (exported cookie line)')
+      console.log('        --token=<token>                                  (`dsh web` URL)')
+      if (mountedOnly === true) {
+        console.log('\n--mounted-only was passed: treating MOUNTED-BUT-UNVERIFIED as success.')
+        return 0
+      }
+      console.log('\nExit 3: mounted, not verified. Pass --mounted-only if that is all you claim.')
+      return 3
     }
     console.log('FAIL  GET / — 401; this probe has no usable session. Re-run with one of:')
     console.log('        --launch=<launch URL the desktop shell reports>   (desktop)')

@@ -124,6 +124,25 @@ jobs:
           fi
           exit "$status"
 
+      # The runtime contract step. The CHANGELOG called this "the only check that
+      # matters after a restart" while CI never ran it at all — so the one probe
+      # that can tell "the route is mounted" from "the plugin silently went away"
+      # was never executed anywhere. A runner has no Host, so the step passes
+      # with an explicit SKIP list of the checks that did NOT run. Where a Host IS
+      # listening it is a real gate, and "mounted but no session" now exits 3
+      # (MOUNTED-BUT-UNVERIFIED) instead of the old silent 0.
+      - name: check (host runtime contract)
+        shell: bash
+        run: |
+          set +e
+          npm run check:host-runtime -- --allow-unreachable > host-runtime.log 2>&1
+          status=$?
+          cat host-runtime.log
+          if [ "$status" -ne 0 ]; then
+            node "$RUNNER_TEMP/annotate.js" host-runtime.log "host runtime" "$RUNNER_OS" "$(node --version)"
+          fi
+          exit "$status"
+
       # Every suite; the runner keeps going after a failing file so one red
       # suite never hides the state of the other nine.
       - name: test

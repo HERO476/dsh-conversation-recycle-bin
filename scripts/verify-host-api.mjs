@@ -23,13 +23,12 @@
  *   --allow-missing-host  exit 0 (with an explicit SKIP line) when no Host
  *                         installation is present. For CI runners, which never
  *                         have a desktop Host: a red build there says nothing
- *                         about drift, and a silent green says nothing at all —
- *                         so the skip is printed.
+ *                         about drift, and a silent green says nothing at all 鈥? *                         so the skip is printed.
  *
  * Exit code: 0 = every assertion holds, 1 = drift found, 2 = host not found.
  */
 import { readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -51,14 +50,47 @@ const hostArg = args.find((value) => value.startsWith('--host='))?.slice('--host
   ?? process.env.DSH_HOST_DIR
   ?? ''
 
+/**
+ * The assertion names this probe must run, whether or not a Host is installed.
+ *
+ * The snapshot check used to live after the "no Host" early return, so the one
+ * runner that cannot read a Host — CI — was also the runner where the check was
+ * unreachable. A Host-less run compared nothing and exited 0 while assertions
+ * were being deleted. Comparing against this fixed list makes the deletion
+ * visible without a Host; comparing `results` against it makes a silently
+ * skipped assertion visible when a Host IS present.
+ */
+const DECLARED_ASSERTIONS = [
+  'host package.json is readable',
+  'plugin engines.dsh admits the installed host',
+  'webServer still supports kind "prefix"',
+  'webServer handler keeps the (req, res) signature',
+  'client module system keeps __ModuleLoader__.load',
+  'client resource stays <id>/client.js',
+  'slot sidebar.workspaces.session.menu.item is still contributed',
+  'slot conversation.session.header.actions is still contributed',
+  'slot shell.overlay is still contributed',
+  'slot settings.section is still contributed',
+  'client bundle registers under the package name',
+  'dsh-workspace still publishes workspace/session-archived',
+  'dsh-workspace still publishes workspace/session-unarchiving',
+  'host project keys stay bounded at 251 chars',
+  'host escapes unsafe code units as ~XXXX',
+  'host still ships the projection cache the checkpoint shape belongs to',
+  'plugin projectKey reproduces the golden vector',
+  'plugin session segment passes a plain id through',
+  'plugin session segment escapes a separator',
+  'plugin projection version matches the Host checkpoint spec',
+]
+
 const results = []
 function record(name, ok, detail) {
   results.push({ name, ok })
-  if (quiet !== true) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`)
+  if (quiet !== true) console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` 鈥?${detail}` : ''}`)
 }
 function skip(name, why) {
   results.push({ name, ok: true })
-  if (quiet !== true) console.log(`SKIP  ${name} — ${why}`)
+  if (quiet !== true) console.log(`SKIP  ${name} 鈥?${why}`)
 }
 
 /* ------------------------------------------------------------------ *
@@ -89,6 +121,9 @@ async function openAsar(path) {
   }
   return {
     kind: 'asar',
+    // An app.asar always nests the runtime under `dsh/`.
+    pkgPrefix: 'dsh',
+    label: path,
     async read(relPath) {
       const node = entry(relPath)
       if (node === null || node.files) return null
@@ -123,8 +158,18 @@ async function openAsar(path) {
 }
 
 function openDirectory(root) {
+  // The `dsh/` nesting is an asar-layout detail, not a rule. Inside app.asar the
+  // Host packages sit at `dsh/node_modules/@deepseek-ai`; a `--host` package
+  // directory or the unpacked `resources/app` tree puts them one level up. A
+  // wrong prefix turns every assertion into a false "package missing", which is
+  // exactly how this probe used to report 9 phantom drifts.
+  const pkgPrefix = existsSync(join(root, 'dsh', 'node_modules', '@deepseek-ai'))
+    ? 'dsh'
+    : ''
   return {
     kind: 'dir',
+    pkgPrefix,
+    label: root,
     async read(relPath) {
       const path = join(root, relPath)
       if (existsSync(path) !== true) return null
@@ -161,29 +206,67 @@ function openDirectory(root) {
   }
 }
 
-function asarCandidates() {
-  const list = []
+/**
+ * Every path an installed desktop Host can live at, most-authoritative first.
+ *
+ * The old list only knew `app.asar`. Once anything renames that file 鈥?the
+ * community purge tool does exactly that, leaving `app.asar.dshpurge-disabled`
+ * 鈥?the probe skipped the real Host, fell back to a profile copy of the CLI and
+ * reported ten phantom drifts against the wrong package. The unpacked `app/`
+ * directory comes first because that is what Electron actually runs whenever
+ * app.asar is absent.
+ */
+function hostCandidates() {
+  const resourcesDirs = []
   if (platform() === 'win32') {
-    list.push(join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness', 'resources', 'app.asar'))
-    list.push('C:/Users/34332/AppData/Local/Programs/DeepSeek Harness/resources/app.asar')
+    resourcesDirs.push(join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness', 'resources'))
+    resourcesDirs.push('C:/Users/34332/AppData/Local/Programs/DeepSeek Harness/resources')
   }
-  list.push(join(homedir(), 'Applications', 'DeepSeek Harness.app', 'Contents', 'Resources', 'app.asar'))
-  list.push('/opt/DeepSeek Harness/resources/app.asar')
-  return list.filter((path) => path !== '' && existsSync(path)).map((path) => resolve(path))
+  resourcesDirs.push(join(homedir(), 'Applications', 'DeepSeek Harness.app', 'Contents', 'Resources'))
+  resourcesDirs.push('/opt/DeepSeek Harness/resources')
+  const candidates = []
+  for (const resources of resourcesDirs) {
+    if (resources === '' || existsSync(resources) !== true) continue
+    for (const name of ['app', 'app.asar', 'app.asar.dshpurge-disabled']) {
+      const path = join(resources, name)
+      if (existsSync(path) === true) candidates.push(resolve(path))
+    }
+  }
+  return candidates
+}
+
+/** Open one candidate as a Host reader, or null when it is not a dsh package tree. */
+async function probeHost(path) {
+  let reader = null
+  try {
+    reader = statSync(path).isDirectory() ? openDirectory(path) : await openAsar(path)
+  } catch {
+    return null
+  }
+  const text = await reader.readFirst(['dsh/package.json', 'package.json'])
+  if (text !== null) return reader
+  await reader.close?.()
+  return null
 }
 
 async function openHost() {
   if (hostArg !== '') {
     if (existsSync(hostArg) !== true) return null
-    return openDirectory(resolve(hostArg))
+    return probeHost(resolve(hostArg))
   }
-  for (const candidate of asarCandidates()) {
-    const reader = await openAsar(candidate)
-    if (await reader.read('dsh/package.json') !== null) return reader
-    await reader.close()
+  for (const candidate of hostCandidates()) {
+    const reader = await probeHost(candidate)
+    if (reader !== null) return reader
   }
+  // Last resort, and loudly: a profile copy of `@deepseek-ai/dsh` is usually the
+  // CLI, not the desktop runtime this plugin ships against. Silence here is what
+  // made the default invocation look like real Host drift.
   const profileRoot = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'profiles', 'node_modules', '@deepseek-ai', 'dsh')
-  if (existsSync(profileRoot) === true) return openDirectory(profileRoot)
+  if (existsSync(profileRoot) === true) {
+    console.log(`WARN  no desktop Host tree found; falling back to a profile copy at ${profileRoot}.`)
+    console.log('      That is usually the CLI package, not the desktop runtime. Pass --host=<鈥?resources/app> to check the desktop tree.')
+    return openDirectory(profileRoot)
+  }
   return null
 }
 
@@ -191,7 +274,16 @@ async function openHost() {
  * Assertions
  * ------------------------------------------------------------------ */
 
-const PKG = (name) => `dsh/node_modules/@deepseek-ai/${name}`
+/**
+ * Resolve a Host package path inside whichever layout was opened. An app.asar
+ * nests everything under `dsh/`; an unpacked tree or a package directory does
+ * not. Getting this wrong is indistinguishable from real contract drift.
+ */
+function hostPkg(host, name) {
+  const prefix = host?.pkgPrefix ?? 'dsh'
+  const inner = `node_modules/@deepseek-ai/${name}`
+  return prefix === '' ? inner : `${prefix}/${inner}`
+}
 
 /** Compare a version against the plugin's `engines.dsh` without a dependency. */
 function satisfiesRange(version, range) {
@@ -240,6 +332,36 @@ async function readSnapshotQuietly(path) {
   }
 }
 
+/**
+ * How a snapshot comparison failed, or null when it holds.
+ *
+ * Three directions, because each one is a different accident:
+ *   missing  — the snapshot names an assertion that no longer runs (deleted).
+ *   skipped  — a declared assertion produced no result on this run.
+ *   stale    — the snapshot is older than the declaration list, i.e. it would
+ *              NOT notice a future deletion. A snapshot that is missing entries
+ *              must be refreshed, not silently accepted.
+ */
+function snapshotProblem(recorded, names) {
+  if (recorded === null) return 'the recorded assertion list is not readable'
+  const missing = recorded.assertions.filter((name) => !names.includes(name))
+  if (missing.length > 0) return `missing: ${missing.join(', ')}`
+  const skipped = DECLARED_ASSERTIONS.filter((name) => !names.includes(name))
+  if (skipped.length > 0) return `declared but never ran: ${skipped.join(', ')}`
+  const stale = DECLARED_ASSERTIONS.filter((name) => !recorded.assertions.includes(name))
+  if (stale.length > 0) return `snapshot is stale; it does not record: ${stale.join(', ')}`
+  return null
+}
+
+/** Host-less variant: compare the snapshot to the fixed declaration list. */
+async function checkSnapshotAgainst(names) {
+  if (snapshotPath === '') return true
+  const recorded = await readSnapshotQuietly(snapshotPath)
+  const problem = snapshotProblem(recorded, names)
+  console.log(`${problem === null ? 'PASS' : 'FAIL'}  snapshot: every recorded contract assertion still runs — ${problem ?? `${recorded.assertions.length} assertion(s)`}`)
+  return problem === null
+}
+
 async function main() {
   const host = await openHost()
   if (host === null) {
@@ -261,6 +383,9 @@ async function main() {
         console.log('SKIP  no dsh installation found in this runner; host-API assertions were NOT executed.')
       }
       console.log('      Run this on a machine with the desktop app (or set DSH_HOST_DIR) before releasing.')
+      // Deleting an assertion is the one drift a Host-less runner can still
+      // detect — which is exactly why it must not sit behind this early return.
+      if (await checkSnapshotAgainst(DECLARED_ASSERTIONS) !== true) return 1
       return 0
     }
     console.log('FAIL  host package not found; pass --host=<dir> or set DSH_HOST_DIR')
@@ -274,9 +399,10 @@ async function main() {
       record('host package.json is readable', false, 'no dsh/package.json in the selected host')
       return 1
     }
-    const hostPkg = JSON.parse(hostPkgText)
-    const hostVersion = String(hostPkg.version ?? '')
-    record('host package.json is readable', true, `${hostPkg.name ?? 'unknown'} ${hostVersion}`)
+    // `hostPackage`, not `hostPkg`: the latter is the path-resolver function.
+    const hostPackage = JSON.parse(hostPkgText)
+    const hostVersion = String(hostPackage.version ?? '')
+    record('host package.json is readable', true, `${hostPackage.name ?? 'unknown'} ${hostVersion} (${host.label})`)
 
     // `engines.dsh` no longer stops at 0.3.0: a hard upper bound made the Host
     // REFUSE to load the plugin on an upgrade (a throw, not a warning), which is
@@ -297,9 +423,9 @@ async function main() {
       record('plugin engines.dsh admits the installed host', satisfiesRange(hostVersion, engine), `${hostVersion} vs ${engine}`)
     }
 
-    // 2. `webServer.register({kind:'prefix'})` — the whole Host half hangs off
+    // 2. `webServer.register({kind:'prefix'})` 鈥?the whole Host half hangs off
     //    this one call. `handler(req, res)` owns the response lifecycle.
-    const webServer = await host.readFirst([`${PKG('dsh-host-webserver')}/src/index.ts`, `${PKG('dsh-host-webserver')}/lib/index.js`])
+    const webServer = await host.readFirst([`${hostPkg(host, 'dsh-host-webserver')}/src/index.ts`, `${hostPkg(host, 'dsh-host-webserver')}/lib/index.js`])
     if (webServer === null) {
       record('host exposes dsh-host-webserver', false, 'package missing')
     } else {
@@ -309,7 +435,7 @@ async function main() {
 
     // 3. The client-module contract: `load({id, factory})` plus the
     //    `<row.id>/client.js` resource rule the bundle URL depends on.
-    const clientModules = await host.readFirst([`${PKG('dsh-client-modules')}/src/client/system.ts`, `${PKG('dsh-client-modules')}/lib/index.js`])
+    const clientModules = await host.readFirst([`${hostPkg(host, 'dsh-client-modules')}/src/client/system.ts`, `${hostPkg(host, 'dsh-client-modules')}/lib/index.js`])
     if (clientModules === null) {
       record('host exposes dsh-client-modules', false, 'package missing')
     } else {
@@ -320,7 +446,7 @@ async function main() {
     // 4. Every Slot the Client renders into must still be contributed by some
     //    Host package. A renamed Slot is invisible: nothing errors, the entry
     //    simply never renders. The owner list is scanned by folder rather than
-    //    by a fixed filename — a Slot can be injected from a mount module the
+    //    by a fixed filename 鈥?a Slot can be injected from a mount module the
     //    package adds at any point in its life.
     const slots = [
       { slot: 'sidebar.workspaces.session.menu.item', owners: ['dsh-client-ui-workspace'] },
@@ -332,7 +458,7 @@ async function main() {
     for (const { slot, owners } of slots) {
       let found = false
       for (const owner of owners) {
-        const base = PKG(owner)
+        const base = hostPkg(host, owner)
         const paths = [
           ...await host.list(`${base}/src/client`),
           ...await host.list(`${base}/lib`),
@@ -353,14 +479,14 @@ async function main() {
     const declaredId = clientSource.match(/id:\s*'([^']+)'/)?.[1] ?? ''
     record('client bundle registers under the package name', declaredId === plugin.name, `id=${declaredId || 'missing'} name=${plugin.name}`)
 
-    // 6. The archive lifecycle events the "archive → recycle bin" path hangs off.
+    // 6. The archive lifecycle events the "archive 鈫?recycle bin" path hangs off.
     //    `ctx.on` ACCEPTS an event name nobody publishes (Cordis creates the hook
     //    list on demand), so a rename would not throw: the feature would simply
     //    never fire while the UI kept promising a 30-day cleanup. Assert the
     //    publisher, not our own listener.
     const workspaceRegistry = await host.readFirst([
-      `${PKG('dsh-workspace')}/src/index.ts`,
-      `${PKG('dsh-workspace')}/lib/index.js`,
+      `${hostPkg(host, 'dsh-workspace')}/src/index.ts`,
+      `${hostPkg(host, 'dsh-workspace')}/lib/index.js`,
     ])
     if (workspaceRegistry === null) {
       record('host exposes dsh-workspace (archive events)', false, 'package missing')
@@ -379,15 +505,15 @@ async function main() {
     }
 
     // 7. Data-layout golden vectors. The plugin reimplements Host-PRIVATE
-    //    encodings — project directory keys, session path segments, the
-    //    projection checkpoint shape — and none of that is a public API. A
+    //    encodings 鈥?project directory keys, session path segments, the
+    //    projection checkpoint shape 鈥?and none of that is a public API. A
     //    silent change there restores a conversation into the wrong directory,
     //    or titles every row blank, with no error anywhere. Assert both sides:
     //    the Host source still contains the rules, and this plugin still
     //    produces the documented output for a fixed input set.
     const format = await host.readFirst([
-      `${PKG('dsh-session-persistence-jsonl')}/src/format.ts`,
-      `${PKG('dsh-session-persistence-jsonl')}/lib/index.js`,
+      `${hostPkg(host, 'dsh-session-persistence-jsonl')}/src/format.ts`,
+      `${hostPkg(host, 'dsh-session-persistence-jsonl')}/lib/index.js`,
     ])
     if (format === null) {
       record('host exposes dsh-session-persistence-jsonl', false, 'package missing')
@@ -395,8 +521,8 @@ async function main() {
       record('host project keys stay bounded at 251 chars', format.includes('251'))
       record('host escapes unsafe code units as ~XXXX', /padStart\(4,\s*'0'\)|~[0-9A-F]{4}/.test(format))
       const projectionCache = await host.readFirst([
-        `${PKG('dsh-session-projection-cache')}/src/index.ts`,
-        `${PKG('dsh-session-projection-cache')}/lib/index.js`,
+        `${hostPkg(host, 'dsh-session-projection-cache')}/src/index.ts`,
+        `${hostPkg(host, 'dsh-session-projection-cache')}/lib/index.js`,
       ])
       record(
         'host still ships the projection cache the checkpoint shape belongs to',
@@ -415,8 +541,8 @@ async function main() {
     // source for `= 7`, so a Host bump to 8 left it green while every row
     // silently lost its title. Compare against the Host's own checkpoint spec.
     const projectionSpec = await host.readFirst([
-      `${PKG('dsh-session-projection-cache')}/src/spec.ts`,
-      `${PKG('dsh-session-projection-cache')}/lib/index.js`,
+      `${hostPkg(host, 'dsh-session-projection-cache')}/src/spec.ts`,
+      `${hostPkg(host, 'dsh-session-projection-cache')}/lib/index.js`,
     ])
     const hostProjection = projectionSpec === null
       ? null
@@ -433,17 +559,14 @@ async function main() {
       if (quiet !== true) console.log(`\nsnapshot written: ${writeSnapshotPath} (${snapshot.assertions.length} assertion(s), host ${hostVersion})`)
     }
     if (snapshotPath !== '') {
+      const names = results.map((item) => item.name)
       const recorded = await readSnapshotQuietly(snapshotPath)
-      if (recorded === null) {
-        record('snapshot: the recorded assertion list is readable', false, snapshotPath)
-      } else {
-        const missing = recorded.assertions.filter((name) => !results.some((item) => item.name === name))
-        record(
-          'snapshot: every recorded contract assertion still runs',
-          missing.length === 0,
-          missing.length === 0 ? `${recorded.assertions.length} assertion(s)` : `missing: ${missing.join(', ')}`,
-        )
-      }
+      const problem = snapshotProblem(recorded, names)
+      record(
+        'snapshot: every recorded contract assertion still runs',
+        problem === null,
+        problem ?? `${recorded.assertions.length} assertion(s)`,
+      )
     }
 
     const failed = results.filter((item) => item.ok !== true)
