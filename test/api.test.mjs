@@ -754,19 +754,34 @@ test('hard delete: a log being written by another instance is not moved', async 
   const home = await makeTempHome()
   try {
     const seeded = await seedSession(home, { sessionId: S1, cwd: 'D:\\Work' })
+    // The grace window must be LONGER than the gap between seeding and the move.
+    // `assertNoForeignWriter` returns early on `age >= grace` WITHOUT looking at
+    // the second write, so a 120 ms window made this test a race: it passed
+    // locally and failed on the slowest CI runner (node 24 on windows-latest),
+    // where the freshly seeded log was already older than 120 ms — the recheck
+    // was skipped, the move succeeded, and the rejection never happened. The
+    // injected `delay` is instantaneous, so a large window costs nothing.
+    const warnings = []
     const ops = createSessionLogOps({
       gateway: { findSessionDir: async () => seeded.dir },
       paths: resolveDataPaths(home.root),
-      config: normalizeConfig({ foreignWriterGraceMs: 120 }).value,
+      config: normalizeConfig({ foreignWriterGraceMs: 5_000 }).value,
       // Simulate the second Host appending during the grace window.
       delay: async () => { await writeFile(join(seeded.dir, 'session.jsonl.zstd'), Buffer.alloc(32, 3)) },
-      logger: { warn() {} },
+      logger: { warn: (message) => warnings.push(String(message)) },
     })
     await assert.rejects(
       () => ops.moveToTrash({ id: S1, live: false }, join(home.root, 'entry')),
       (error) => error.code === 'E_POLICY_FOREIGN_WRITER',
     )
     assert.equal(await pathExists(seeded.dir), true)
+    // Positive proof that the recheck ran instead of short-circuiting on age:
+    // without this, a future window that is too small fails only on a slow
+    // runner and looks like a product bug.
+    assert.ok(
+      warnings.some((line) => line.includes('waiting')),
+      `the grace-window recheck never ran, so nothing proved the writer was seen: ${warnings.join(' | ')}`,
+    )
   } finally {
     await home.cleanup()
   }
